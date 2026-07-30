@@ -1,2 +1,3 @@
 # auto_arras
-Tool for automation arras.io sandbox.
+
+A tool for automating actions in the arras.io sandbox.
