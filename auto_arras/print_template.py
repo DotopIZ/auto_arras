@@ -12,7 +12,7 @@ from PIL import ImageOps
 from .utils.gen_utils import compile_template
 from typing import Annotated, Optional
 
-from .config import TANK_FOV, WALLS_COLOR_COUNT, WALLS_TYPE_COUNT
+from .config import TANK_FOV, WALLS_COLOR_COUNT, WALLS_TYPE_COUNT, JOINTS_TYPE_COUNT, POLYGON_SIZE_COUNT, POLYGON_TIER_COUNT, POLYGON_TYPE_COUNT, POLYGON_SIZE_MOVE_OFFSET, POLYGON_TIER_MOVE_OFFSET, POLYGON_TYPE_MOVE_OFFSET
 
 app = typer.Typer()
 
@@ -21,9 +21,11 @@ app = typer.Typer()
 mc = mouse.Controller()
 kc = keyboard.Controller()
 
-
+cur_joint = 0
+cur_polygon = [0, 0, 0]
 
 def get_micro_instructions(instruction) -> list[str]:
+    global cur_joint
     com = instruction
     tokens = instruction.split()
     command = tokens[0]
@@ -121,18 +123,76 @@ def get_micro_instructions(instruction) -> list[str]:
                     'r c'
                 )
             },
+            'wall_type': {
+                3: (
+                    f'm {i[0]} {i[1]}',
+                    'p z',
+                    f'tm {i[2]}',
+                    'r z',
+                )
+            },
             'joint': {
                 4: (
                     f'm {i[0]} {i[1]}',
                     'p j',
                     f'lm {i[2]} {i[3]}',
                     'r j'
+                ),
+                5: (
+                    f'm {-1} {-1}',
+                    f'sj {i[4]}',
+                    f'm {i[0]} {i[1]}',
+                    'p j',
+                    f'lm {i[2]} {i[3]}',
+                    'r j',
+                ),
+            },
+            'polygon': {
+                2: (
+                    f'm {i[0]} {i[1]}',
+                    't f'
+                ),
+                5: (
+                    f'm {i[0]} {i[1]}',
+                    't f',
+                    'p z',
+                    f'pcm {i[2]}',
+                    'r z',
+                    f'm {i[0]} {i[1]}',
+                    'p z',
+                    f'psm {i[3]}',
+                    'r z',
+                    f'm {i[0]} {i[1]}',
+                    'p z',
+                    f'ptm {i[4]}',
+                    'r z',
                 )
-            }
+            },
+            'polygon_type': {
+                2: (
+                    f'm {i[0]} {i[1]}',
+                ),
+                5: (
+                    f'm {i[0]} {i[1]}',
+                    'p z',
+                    f'pcm {i[2]}',
+                    'r z',
+                    f'm {i[0]} {i[1]}',
+                    'p z',
+                    f'psm {i[3]}',
+                    'r z',
+                    f'm {i[0]} {i[1]}',
+                    'p z',
+                    f'ptm {i[4]}',
+                    'r z',
+                )
+            },
         }
     except ValueError:
         return [com]
 
+    if command == "joint":
+        print(cur_joint, i[2])
     try:
         return MICRO_INSTRUCTIONS_TABLE[command][arg_len]
     except KeyError:
@@ -210,6 +270,42 @@ def type_to_position(
     type_vector = wall_pos_to_px(type_vector, 64, offset)
     return type_vector
 
+def polygon_size_move(siz, wall_px_size, offset=(0, 0)):
+    global cur_polygon
+    siz = int(siz)
+    size = (siz + POLYGON_SIZE_COUNT - cur_polygon[1]) % POLYGON_SIZE_COUNT
+    cur_polygon[1] = siz
+    w_offset = (size * POLYGON_SIZE_MOVE_OFFSET, 0)
+    print(cur_polygon, 'a', size)
+    return wall_pos_to_px(w_offset, wall_px_size, offset)
+
+def polygon_tier_move(tier, wall_px_size, offset=(0, 0)):
+    global cur_polygon
+    tier = int(tier)
+    size = (tier + POLYGON_TIER_COUNT - cur_polygon[2]) % POLYGON_TIER_COUNT
+    cur_polygon[2] = tier
+    w_offset = (size * POLYGON_TIER_MOVE_OFFSET * 0.70710678, size * POLYGON_TIER_MOVE_OFFSET * 0.70710678)
+    print(cur_polygon, 'a', size)
+    return wall_pos_to_px(w_offset, wall_px_size, offset)
+
+def polygon_class_move(typ, wall_px_size, offset=(0, 0)):
+    global cur_polygon
+    typ = int(typ)
+    size = (typ + POLYGON_TYPE_COUNT - cur_polygon[0]) % POLYGON_TYPE_COUNT
+    cur_polygon[0] = typ
+    w_offset = (size * POLYGON_TYPE_MOVE_OFFSET * -0.70710678, size * POLYGON_TYPE_MOVE_OFFSET * 0.70710678)
+    print(cur_polygon, 'a', size)
+    return wall_pos_to_px(w_offset, wall_px_size, offset)
+
+def select_joint(joint, press_interval):
+    global cur_joint
+    joint = int(joint)
+    joff = (joint + JOINTS_TYPE_COUNT - cur_joint) % JOINTS_TYPE_COUNT
+    cur_joint = joint
+    for i in range(joff):
+        kc.press('j')
+        kc.release('j')
+        sleep(press_interval)
 
 def exec_instruction(
     instruction: str,
@@ -256,6 +352,14 @@ def exec_instruction(
             mc.position = type_to_position(
                     args[0], WALLS_COLOR_COUNT, wall_px_size, mc.position
                 )
+        case 'psm':
+            mc.position = polygon_size_move(args[0], wall_px_size, mc.position)
+        case 'ptm':
+            mc.position = polygon_tier_move(args[0], wall_px_size, mc.position)
+        case 'pcm':
+            mc.position = polygon_class_move(args[0], wall_px_size, mc.position)
+        case 'sj':
+            select_joint(args[0], press_interval)
         case 's':
             sleep(press_interval)
         case 'ls':
@@ -310,11 +414,14 @@ OR ELSE THE MACRO WILL WORK WRONG.""")
             )
             mc.position = mouse_og_pos
 
-    sleep(1)
+    #sleep(1)
+    
+    cur_joint = 0
 
     kc.press('`')
     for instruction in template:
         micro_instructions = get_micro_instructions(instruction)
+        print(f"{instruction=} {micro_instructions=}")
         for micro_instruction in micro_instructions:
             exec_instruction(
                 micro_instruction, wall_px_size, mouse_og_pos, press_interval

@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import json
+import math
 
 # Внешняя функция экспорта, вызываемая приложением.
 
@@ -47,18 +48,23 @@ class GridApp:
         self.is_moving_selection = False
         
         # Основной словарь постоянных данных сетки: {(x, y): {"tool": name, "props": {...}}}
-        self.grid_data = {}
+        # В __init__ заменяем self.grid_data = {} на:
+        # ЗАМЕНИТЕ инициализацию self.layers в __init__ на эту:
+        self.layers = [
+            {"name": "Слой 1", "visible": True, "data": {}, "lines": {}}
+        ]
+        self.active_layer_idx = 0
+        self.line_start = None  # Переменная для хранения начала линии
         
         # Стеки для отмены и возврата действий (Undo / Redo)
         self.undo_stack = []
         self.redo_stack = []
         
         # Плавающие данные (для перемещения выделения и вставки)
-        self.floating_data = None      # {(rel_c, rel_r): {"tool": name, "props": {...}}}
-        self.floating_offset = (0, 0)  # (top_left_col, top_left_row) на сетке
-        
-        # Буфер обмена для копирования/вырезания
-        self.clipboard = None
+        self.floating_data = None      # Клетки во время перемещения/вставки
+        self.floating_lines = None     # Линии во время перемещения/вставки
+        self.floating_offset = (0, 0)
+        self.clipboard = None          # Буфер: {"cells": {...}, "lines": {...}}
         
         # Состояние статического выделения
         self.selection = None          # (min_c, min_r, max_c, max_r)
@@ -119,6 +125,30 @@ class GridApp:
         
         # Регистрируем глобальный клик для снятия фокуса с полей ввода
         self.root.bind_all("<Button-1>", self.global_click_handler, add="+")
+    
+    # === ДОБАВИТЬ СРАЗУ ПОСЛЕ __init__ ===
+    @property
+    def grid_data(self):
+        return self.layers[self.active_layer_idx]["data"]
+
+    @grid_data.setter
+    def grid_data(self, value):
+        self.layers[self.active_layer_idx]["data"] = value
+
+    @property
+    def grid_lines(self):
+        """Возвращает данные линий текущего активного слоя."""
+        return self.layers[self.active_layer_idx]["lines"]
+
+    @grid_lines.setter
+    def grid_lines(self, value):
+        self.layers[self.active_layer_idx]["lines"] = value
+
+    def is_line_tool(self, name):
+        """Проверяет, является ли инструмент линией (3-й аргумент 'line')."""
+        data = self.tools.get(name, [])
+        return len(data) >= 3 and data[2] == "line"
+    
 
     def parse_tools(self, tools_input):
         """Нормализует входящие инструменты в структуру с группами и плоский словарь."""
@@ -276,8 +306,10 @@ class GridApp:
         self.redraw_canvas()
 
     def export_data(self):
-        """Вызывает внешнюю функцию экспорта и запрашивает путь для сохранения файла."""
-        processed_data = export(self.grid_data)
+        """Вызывает внешнюю функцию экспорта с отсортированным списком слоев."""
+        exported_layers = []
+
+        processed_data = export(self.layers)
         
         file_path = filedialog.asksaveasfilename(
             defaultextension=".txt", 
@@ -339,52 +371,79 @@ class GridApp:
             return "black"
 
     def save_state(self):
-        """Сохраняет текущее состояние сетки в стек отмены."""
-        state = {
-            "grid_data": {loc: {"tool": data["tool"], "props": data["props"].copy()} for loc, data in self.grid_data.items()}
-        }
-        self.undo_stack.append(state)
-        self.redo_stack.clear()
-        if len(self.undo_stack) > 50:
-            self.undo_stack.pop(0)
-        self.mark_dirty()
+            state = {
+                "active_layer_idx": self.active_layer_idx,
+                "layers": [
+                    {
+                        "name": l["name"], "visible": l["visible"],
+                        "data": {loc: {"tool": d["tool"], "props": d["props"].copy()} for loc, d in l["data"].items()},
+                        "lines": {k: {"tool": v["tool"], "props": v["props"].copy()} for k, v in l.get("lines", {}).items()}
+                    } for l in self.layers
+                ]
+            }
+            self.undo_stack.append(state)
+            self.redo_stack.clear()
+            if len(self.undo_stack) > 50: self.undo_stack.pop(0)
+            self.mark_dirty()
 
+    def _restore_state(self, state):
+        self.active_layer_idx = state["active_layer_idx"]
+        self.layers = [
+            {
+                "name": l["name"], "visible": l["visible"],
+                "data": {loc: {"tool": d["tool"], "props": d["props"].copy()} for loc, d in l["data"].items()},
+                "lines": {k: {"tool": v["tool"], "props": v["props"].copy()} for k, v in l.get("lines", {}).items()}
+            } for l in state["layers"]
+        ]
+        self.update_right_toolbar()
+        self.redraw_canvas()
+    
     def undo(self, event=None):
         if not self.undo_stack:
             return
         current_state = {
-            "grid_data": {loc: {"tool": data["tool"], "props": data["props"].copy()} for loc, data in self.grid_data.items()}
+            "active_layer_idx": self.active_layer_idx,
+            "layers": [{"name": l["name"], "visible": l["visible"], "data": {loc: {"tool": d["tool"], "props": d["props"].copy()} for loc, d in l["data"].items()}} for l in self.layers]
         }
         self.redo_stack.append(current_state)
-        prev_state = self.undo_stack.pop()
-        self.grid_data = prev_state["grid_data"]
-        
+        self._restore_state(self.undo_stack.pop())
         self.mark_dirty()
-        self.redraw_canvas()
-        print("Действие отменено (Undo).")
 
     def redo(self, event=None):
         if not self.redo_stack:
             return
         current_state = {
-            "grid_data": {loc: {"tool": data["tool"], "props": data["props"].copy()} for loc, data in self.grid_data.items()}
+            "active_layer_idx": self.active_layer_idx,
+            "layers": [{"name": l["name"], "visible": l["visible"], "data": {loc: {"tool": d["tool"], "props": d["props"].copy()} for loc, d in l["data"].items()}} for l in self.layers]
         }
         self.undo_stack.append(current_state)
-        next_state = self.redo_stack.pop()
-        self.grid_data = next_state["grid_data"]
-            
+        self._restore_state(self.redo_stack.pop())
         self.mark_dirty()
+
+    def add_layer(self):
+        self.commit_floating()
+        self.save_state()
+        new_name = f"Слой {len(self.layers) + 1}"
+        self.layers.append({"name": new_name, "visible": True, "data": {}, "lines": {}})
+        self.active_layer_idx = len(self.layers) - 1
+        self.update_right_toolbar()
         self.redraw_canvas()
-        print("Действие возвращено (Redo).")
 
     def save_dictionary_file(self):
         file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
         if file_path:
-            data_to_save = {f"{c},{r}": item for (c, r), item in self.grid_data.items()}
+            save_payload = {
+                "layers": [
+                    {
+                        "name": l["name"], "visible": l["visible"],
+                        "cells": {f"{c},{r}": item for (c, r), item in l["data"].items()},
+                        "lines": {f"{c1},{r1};{c2},{r2}": v for ((c1, r1), (c2, r2)), v in l.get("lines", {}).items()}
+                    } for l in self.layers
+                ]
+            }
             try:
                 with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(data_to_save, f, ensure_ascii=False, indent=4)
-                print(f"Словарь успешно сохранен в {file_path}")
+                    json.dump(save_payload, f, ensure_ascii=False, indent=4)
                 self.is_dirty = False
                 return True
             except Exception as e:
@@ -395,22 +454,157 @@ class GridApp:
         file_path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
         if file_path:
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    data_loaded = json.load(f)
+                with open(file_path, "r", encoding="utf-8") as f: data_loaded = json.load(f)
                 self.save_state()
-                self.grid_data = {}
-                target_dict = data_loaded.get("cells", data_loaded)
-                for key_str, item in target_dict.items():
-                    c_str, r_str = key_str.split(",")
-                    loc = (int(c_str), int(r_str))
-                    self.grid_data[loc] = item
+                self.layers = []
+                if "layers" in data_loaded:
+                    for l_data in data_loaded["layers"]:
+                        layer_dict = {}
+                        for key_str, item in l_data.get("cells", {}).items():
+                            c_str, r_str = key_str.split(",")
+                            layer_dict[(int(c_str), int(r_str))] = item
+                        
+                        layer_lines = {}
+                        for key_str, item in l_data.get("lines", {}).items():
+                            p1, p2 = key_str.split(";")
+                            c1, r1 = map(int, p1.split(","))
+                            c2, r2 = map(int, p2.split(","))
+                            layer_lines[((c1, r1), (c2, r2))] = item
+
+                        self.layers.append({
+                            "name": l_data.get("name", "Слой"),
+                            "visible": l_data.get("visible", True),
+                            "data": layer_dict, "lines": layer_lines
+                        })
+                self.active_layer_idx = 0
+                self.update_right_toolbar()
                 self.redraw_canvas()
                 self.is_dirty = False
-                print(f"Словарь успешно загружен из {file_path}")
             except Exception as e:
-                print(f"Ошибка загрузки файла: {e}")
+                print(f"Ошибка загрузки: {e}")
+
 
     def update_right_toolbar(self):
+        """Обновляет правый тулбар: панель слоев + свойства выбранного инструмента."""
+        self.right_toolbar.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
+        
+        for widget in self.right_toolbar.winfo_children():
+            widget.destroy()
+
+        # --- БЛОК 1: Управление слоями ---
+        layers_header = tk.Frame(self.right_toolbar)
+        layers_header.pack(fill=tk.X, padx=5, pady=(5, 2))
+        
+        tk.Label(layers_header, text="Слои", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        
+        # Кнопка добавления нового слоя
+        add_btn = tk.Button(layers_header, text="+ Слой", font=("Arial", 8), command=self.add_layer)
+        add_btn.pack(side=tk.RIGHT)
+
+        tk.Frame(self.right_toolbar, height=1, bg="gray").pack(fill=tk.X, padx=5, pady=2)
+
+        # Контейнер для списка слоев (отображаем от верхнего слоя к нижнему)
+        layers_frame = tk.Frame(self.right_toolbar)
+        layers_frame.pack(fill=tk.X, padx=5, pady=2)
+
+        for idx in range(len(self.layers) - 1, -1, -1):
+            layer = self.layers[idx]
+            is_active = (idx == self.active_layer_idx)
+            
+            row = tk.Frame(layers_frame, bg="#d0e0f0" if is_active else "#f0f0f0", bd=1, relief=tk.RIDGE)
+            row.pack(fill=tk.X, pady=1)
+
+            # Видимость слоя (глаз)
+            vis_icon = "👁" if layer["visible"] else "🙈"
+            vis_btn = tk.Button(
+                row, text=vis_icon, width=2, relief=tk.FLAT,
+                bg="#d0e0f0" if is_active else "#f0f0f0",
+                command=lambda i=idx: self.toggle_layer_visibility(i)
+            )
+            vis_btn.pack(side=tk.LEFT)
+
+            # Выбор слоя активным
+            name_btn = tk.Button(
+                row, text=layer["name"], anchor="w", relief=tk.FLAT,
+                font=("Arial", 9, "bold" if is_active else "normal"),
+                bg="#d0e0f0" if is_active else "#f0f0f0",
+                command=lambda i=idx: self.set_active_layer(i)
+            )
+            name_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            # Перемещение слоя выше/ниже
+            up_btn = tk.Button(row, text="▲", width=1, relief=tk.FLAT, command=lambda i=idx: self.move_layer(i, 1))
+            up_btn.pack(side=tk.LEFT)
+            
+            down_btn = tk.Button(row, text="▼", width=1, relief=tk.FLAT, command=lambda i=idx: self.move_layer(i, -1))
+            down_btn.pack(side=tk.LEFT)
+
+            # Удаление слоя (если слоев больше одного)
+            if len(self.layers) > 1:
+                del_btn = tk.Button(row, text="✕", width=2, fg="red", relief=tk.FLAT, command=lambda i=idx: self.remove_layer(i))
+                del_btn.pack(side=tk.RIGHT)
+
+        # --- БЛОК 2: Свойства инструмента ---
+        if self.current_props_list:
+            tk.Frame(self.right_toolbar, height=2, bg="gray").pack(fill=tk.X, padx=5, pady=10)
+            tk.Label(self.right_toolbar, text=f"Свойства: {self.current_value}", font=("Arial", 10, "bold")).pack(anchor="w", padx=5, pady=2)
+
+            props_frame = tk.Frame(self.right_toolbar)
+            props_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            vcmd = (self.root.register(self.validate_digit), '%P')
+
+            for prop in self.current_props_list:
+                row_frame = tk.Frame(props_frame)
+                row_frame.pack(fill=tk.X, pady=3)
+
+                tk.Label(row_frame, text=f"{prop}:", width=12, anchor="w").pack(side=tk.LEFT)
+
+                if prop not in self.tool_prop_values[self.current_value]:
+                    self.tool_prop_values[self.current_value][prop] = "0"
+
+                var = tk.StringVar(value=self.tool_prop_values[self.current_value][prop])
+                var.trace_add("write", lambda *args, p=prop, v=var: self.update_prop_value(p, v))
+
+                entry = tk.Entry(row_frame, width=8, textvariable=var, validate='key', validatecommand=vcmd)
+                entry.pack(side=tk.RIGHT)
+
+    # --- Методы управления слоями ---
+    def set_active_layer(self, idx):
+        self.commit_floating()
+        self.active_layer_idx = idx
+        self.update_right_toolbar()
+        self.redraw_canvas()
+
+
+    def remove_layer(self, idx):
+        if len(self.layers) <= 1:
+            return
+        self.commit_floating()
+        self.save_state()
+        del self.layers[idx]
+        if self.active_layer_idx >= len(self.layers):
+            self.active_layer_idx = len(self.layers) - 1
+        self.update_right_toolbar()
+        self.redraw_canvas()
+
+    def toggle_layer_visibility(self, idx):
+        self.layers[idx]["visible"] = not self.layers[idx]["visible"]
+        self.update_right_toolbar()
+        self.redraw_canvas()
+
+    def move_layer(self, idx, direction):
+        new_idx = idx + direction
+        if 0 <= new_idx < len(self.layers):
+            self.commit_floating()
+            self.save_state()
+            self.layers[idx], self.layers[new_idx] = self.layers[new_idx], self.layers[idx]
+            if self.active_layer_idx == idx:
+                self.active_layer_idx = new_idx
+            elif self.active_layer_idx == new_idx:
+                self.active_layer_idx = idx
+            self.update_right_toolbar()
+            self.redraw_canvas()
         """Обновляет правый тулбар свойствами выбранного инструмента или скрывает его."""
         if not self.current_props_list:
             self.right_toolbar.pack_forget()
@@ -587,8 +781,14 @@ class GridApp:
         self.mouse_col = int(world_x // self.cell_size)
         self.mouse_row = int(world_y // self.cell_size)
         
-        # Выводим текущие координаты сетки
         self.status_bar.config(text=f"Координаты: ({self.mouse_col}, {self.mouse_row})")
+
+        # ИСПРАВЛЕНИЕ: Если вставляются/перемещаются ячейки ИЛИ линии, обновляем их позицию за курсором
+        if self.floating_data is not None or self.floating_lines is not None:
+            # Если мы не тянем выделение зажатой кнопкой, а находимся в режиме вставки (пасты)
+            if not getattr(self, 'is_moving_selection', False):
+                self.floating_offset = (self.mouse_col, self.mouse_row)
+                self.redraw_canvas()
     
     def is_click_on_selection(self, col, row):
         """Проверяет, попал ли клик на выделенную или плавающую область."""
@@ -602,7 +802,12 @@ class GridApp:
         return False
 
     def on_left_click(self, event):
-        if (event.state & 0x0001) or (event.state & 0x0004): # Shift или Ctrl
+        if (event.state & 0x0001) or (event.state & 0x0004): 
+            return
+            
+        # ИСПРАВЛЕНИЕ: Проверяем и ячейки, и линии. Если что-то плавает — фиксируем кликом
+        if self.floating_data or self.floating_lines:
+            self.commit_floating()
             return
             
         world_x = event.x + self.cam_x
@@ -612,13 +817,16 @@ class GridApp:
 
         if self.is_click_on_selection(col, row):
             self.is_moving_selection = True
-            
-            if self.selection and not self.floating_data:
+            if self.selection and not self.floating_data and not self.floating_lines:
                 min_c, min_r, max_c, max_r = self.selection
                 has_elements = any((c, r) in self.grid_data for r in range(min_r, max_r + 1) for c in range(min_c, max_c + 1))
-                if has_elements:
+                has_lines = any((min_c <= c1 <= max_c and min_r <= r1 <= max_r) and (min_c <= c2 <= max_c and min_r <= r2 <= max_r) for (c1, r1), (c2, r2) in self.grid_lines.keys())
+                
+                if has_elements or has_lines:
                     self.save_state()
                 self.floating_data = {}
+                self.floating_lines = {}
+                
                 for r in range(min_r, max_r + 1):
                     for c in range(min_c, max_c + 1):
                         loc = (c, r)
@@ -628,6 +836,22 @@ class GridApp:
                                 "props": self.grid_data[loc]["props"].copy()
                             }
                             del self.grid_data[loc]
+                            
+                lines_to_move = []
+                for (start_loc, end_loc), item in self.grid_lines.items():
+                    c1, r1 = start_loc
+                    c2, r2 = end_loc
+                    if (min_c <= c1 <= max_c and min_r <= r1 <= max_r) and (min_c <= c2 <= max_c and min_r <= r2 <= max_r):
+                        rel_start = (c1 - min_c, r1 - min_r)
+                        rel_end = (c2 - min_c, r2 - min_r)
+                        self.floating_lines[(rel_start, rel_end)] = {
+                            "tool": item["tool"],
+                            "props": item["props"].copy()
+                        }
+                        lines_to_move.append((start_loc, end_loc))
+                for k in lines_to_move:
+                    del self.grid_lines[k]
+                    
                 self.floating_offset = (min_c, min_r)
                 self.selection = None
                 self.redraw_canvas()
@@ -637,21 +861,97 @@ class GridApp:
         else:
             self.is_moving_selection = False
             self.commit_floating()
-            self.save_state()
-            self.paint(event)
+            
+            if self.is_line_tool(self.current_value):
+                self.line_start = (col, row)
+            else:
+                self.save_state()
+                self.paint(event)
 
     def on_left_drag(self, event):
         if (event.state & 0x0001) or (event.state & 0x0004):
             return
             
+        # Динамическая отрисовка протягиваемой линии
+        if getattr(self, 'line_start', None) is not None:
+            self.canvas.delete("temp_line")
+            c1, r1 = self.line_start
+            x1 = c1 * self.cell_size - self.cam_x + self.cell_size / 2
+            y1 = r1 * self.cell_size - self.cam_y + self.cell_size / 2
+            
+            world_x = event.x + self.cam_x
+            world_y = event.y + self.cam_y
+            col = int(world_x // self.cell_size)
+            row = int(world_y // self.cell_size)
+            
+            x2 = col * self.cell_size - self.cam_x + self.cell_size / 2
+            y2 = row * self.cell_size - self.cam_y + self.cell_size / 2
+            
+            color = self.tools.get(self.current_value, ["black"])[0]
+            
+            # Рисуем кружок в точке старта
+            r_start = 4
+            self.canvas.create_oval(x1 - r_start, y1 - r_start, x1 + r_start, y1 + r_start, fill=color, outline=color, tags="temp_line")
+            # Рисуем линию со стрелкой на конце
+            self.canvas.create_line(x1, y1, x2, y2, fill=color, width=3, dash=(4,4), arrow=tk.LAST, tags="temp_line")
+            return
+
         if self.is_moving_selection:
             self.during_move(event)
         else:
             self.paint(event)
 
     def on_left_release(self, event):
+        # Сохранение линии при отпускании мыши
+        if getattr(self, 'line_start', None) is not None:
+            self.canvas.delete("temp_line")
+            world_x = event.x + self.cam_x
+            world_y = event.y + self.cam_y
+            col = int(world_x // self.cell_size)
+            row = int(world_y // self.cell_size)
+            
+            if (col, row) != self.line_start:
+                self.save_state()
+                props = {p: self.tool_prop_values[self.current_value].get(p, "0") for p in self.current_props_list}
+                start, end = self.line_start, (col, row)
+                
+                # Направление (start -> end) теперь строго сохраняется
+                self.grid_lines[(start, end)] = {"tool": self.current_value, "props": props}
+                self.mark_dirty()
+                self.redraw_canvas()
+            self.line_start = None
+
         self.is_moving_selection = False
         self.move_start_mouse = None
+
+    def erase(self, event):
+        world_x = event.x + self.cam_x
+        world_y = event.y + self.cam_y
+        col = int(world_x // self.cell_size)
+        row = int(world_y // self.cell_size)
+        location = (col, row)
+        modified = False
+        
+        # Стираем саму клетку
+        if location in self.grid_data:
+            del self.grid_data[location]
+            modified = True
+            
+        # Стираем все линии, которые подключены к этой клетке
+        lines_to_delete = [k for k in self.grid_lines if k[0] == location or k[1] == location]
+        for k in lines_to_delete:
+            del self.grid_lines[k]
+            modified = True
+            
+        if self.floating_data:
+            rel_c, rel_r = col - self.floating_offset[0], row - self.floating_offset[1]
+            if (rel_c, rel_r) in self.floating_data:
+                del self.floating_data[(rel_c, rel_r)]
+                modified = True
+                
+        if modified:
+            self.mark_dirty()
+            self.redraw_canvas()
 
     def paint(self, event):
         world_x = event.x + self.cam_x
@@ -670,27 +970,6 @@ class GridApp:
     def on_right_click(self, event):
         self.save_state()
         self.erase(event)
-
-    def erase(self, event):
-        world_x = event.x + self.cam_x
-        world_y = event.y + self.cam_y
-        col = int(world_x // self.cell_size)
-        row = int(world_y // self.cell_size)
-        
-        location = (col, row)
-        modified = False
-        if location in self.grid_data:
-            del self.grid_data[location]
-            modified = True
-        if self.floating_data:
-            rel_c = col - self.floating_offset[0]
-            rel_r = row - self.floating_offset[1]
-            if (rel_c, rel_r) in self.floating_data:
-                del self.floating_data[(rel_c, rel_r)]
-                modified = True
-        if modified:
-            self.mark_dirty()
-            self.redraw_canvas()
 
     def pick_tool(self, event):
         world_x = event.x + self.cam_x
@@ -757,23 +1036,6 @@ class GridApp:
                 self.canvas.delete(self.sel_rect_id)
                 self.sel_rect_id = None
 
-    def commit_floating(self):
-        if self.floating_data:
-            self.save_state()
-            for (rel_c, rel_r), item in self.floating_data.items():
-                abs_c = self.floating_offset[0] + rel_c
-                abs_r = self.floating_offset[1] + rel_r
-                self.grid_data[(abs_c, abs_r)] = {
-                    "tool": item["tool"],
-                    "props": item["props"].copy()
-                }
-            self.floating_data = None
-            self.mark_dirty()
-        self.selection = None
-        if self.sel_rect_id:
-            self.canvas.delete(self.sel_rect_id)
-            self.sel_rect_id = None
-        self.redraw_canvas()
 
     def redraw_canvas(self):
         self.canvas.delete("all")
@@ -787,36 +1049,75 @@ class GridApp:
         draw_outline = self.cell_size >= self.min_cell_size_grid
         outline_color = "gray" if draw_outline else ""
         
-        # 1. Отрисовка раскрашенных ячеек
-        for loc, item in self.grid_data.items():
-            c, r = loc
-            if start_col <= c < end_col and start_row <= r < end_row:
-                x1 = c * self.cell_size - self.cam_x
-                y1 = r * self.cell_size - self.cam_y
-                x2 = x1 + self.cell_size
-                y2 = y1 + self.cell_size
-                tool_name = item["tool"]
-                color = self.tools.get(tool_name, ["white", []])[0]
-                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline=outline_color)
-                
-                # Отрисовка названия ячейки по порогу зума
-                if self.cell_size >= self.min_cell_size_text:
-                    text_x = x1 + self.cell_size / 2
-                    text_y = y1 + self.cell_size / 2
-                    text_color = self.get_contrast_color(color)
-                    font_size = int(self.cell_size / len(tool_name))
-                    self.canvas.create_text(text_x, text_y, text=tool_name, fill=text_color, font=("Arial", font_size, "bold"))
-                
-        # 2. Отрисовка пустых ячеек
+        """
+        # 1. Отрисовка фоновой пустой сетки
         if draw_outline:
             for r in range(start_row, end_row):
                 for c in range(start_col, end_col):
-                    if (c, r) not in self.grid_data:
+                    x1 = c * self.cell_size - self.cam_x
+                    y1 = r * self.cell_size - self.cam_y
+                    x2 = x1 + self.cell_size
+                    y2 = y1 + self.cell_size
+                    self.canvas.create_rectangle(x1, y1, x2, y2, fill="white", outline=outline_color)
+
+        """
+        already_drew = set()
+        # ЗАМЕНИТЬ блок отрисовки слоев (пункт 2) на этот:
+        # 2. Послойная отрисовка закрашенных ячеек и линий
+        for layer in reversed(self.layers):
+            if not layer["visible"]:
+                continue
+            
+            # Отрисовка клеток
+            for loc, item in layer["data"].items():
+                c, r = loc
+                if loc not in already_drew:
+                    if start_col <= c < end_col and start_row <= r < end_row:
                         x1 = c * self.cell_size - self.cam_x
                         y1 = r * self.cell_size - self.cam_y
                         x2 = x1 + self.cell_size
                         y2 = y1 + self.cell_size
-                        self.canvas.create_rectangle(x1, y1, x2, y2, fill="white", outline=outline_color)
+                        tool_name = item["tool"]
+                        #data = tuple(item["props"].values())
+                        color = self.tools.get(tool_name, ["white", []])[0]
+                        self.canvas.create_rectangle(x1, y1, x2, y2, fill=color)
+                        already_drew.add(loc)
+                        #if self.cell_size >= self.min_cell_size_text:
+                        #    self.canvas.create_text(x1 + self.cell_size/2, y1 + self.cell_size/2, text=f'{tool_name}\n{data}', fill=self.get_contrast_color(color), font=("Arial", int(self.cell_size/len(tool_name)), "bold"))
+
+            if self.cell_size >= self.min_cell_size_text:
+            # Отрисовка линий (связей)
+                for (start_loc, end_loc), item in layer.get("lines", {}).items():
+                    c1, r1 = start_loc
+                    c2, r2 = end_loc
+                    
+                    # Координаты центров клеток
+                    x1 = c1 * self.cell_size - self.cam_x + self.cell_size / 2
+                    y1 = r1 * self.cell_size - self.cam_y + self.cell_size / 2
+                    x2 = c2 * self.cell_size - self.cam_x + self.cell_size / 2
+                    y2 = r2 * self.cell_size - self.cam_y + self.cell_size / 2
+                    
+                    tool_name = item["tool"]
+                    color = self.tools.get(tool_name, ["black"])[0]
+                    line_width = max(2, int(self.cell_size / 8))
+                    
+                    # 1. Кружок в начале линии (Старт)
+                    r_start = line_width * 1.5
+                    self.canvas.create_oval(x1 - r_start, y1 - r_start, x1 + r_start, y1 + r_start, fill=color, outline=color)
+
+                    # 2. Сама линия со стрелкой в конце (Конец)
+                    # Рассчитываем размер стрелки в зависимости от зума (размера клетки)
+                    arrow_size = max(8, int(self.cell_size / 4))
+                    arrow_shape = (arrow_size, arrow_size + 2, max(3, arrow_size // 3))
+                    
+                    self.canvas.create_line(
+                        x1, y1, x2, y2, 
+                        fill=color, 
+                        width=line_width, 
+                        arrow=tk.LAST, 
+                        arrowshape=arrow_shape
+                    )
+
 
         # 3. Рендер маркера точки (0, 0)
         if start_col <= 0 < end_col and start_row <= 0 < end_row:
@@ -828,7 +1129,7 @@ class GridApp:
             if self.cell_size >= self.min_cell_size_marker:
                 self.canvas.create_text(ox1 + 5, oy1 + 5, text="(0,0)", anchor="nw", fill="#e74c3c", font=("Arial", 8, "bold"))
                 
-        # Отрисовка плавающих данных (вставка / перемещение)
+        # 4. Отрисовка плавающих данных (вставка / перемещение)
         if self.floating_data:
             for (rel_c, rel_r), item in self.floating_data.items():
                 abs_c = self.floating_offset[0] + rel_c
@@ -849,63 +1150,139 @@ class GridApp:
                         font_size = max(8, int(self.cell_size / 5))
                         self.canvas.create_text(text_x, text_y, text=tool_name, fill=text_color, font=("Arial", font_size, "bold"))
                     
+        # Отрисовка плавающих линий (вставка / перемещение)
+        if self.floating_lines:
+            for (rel_start, rel_end), item in self.floating_lines.items():
+                abs_start = (self.floating_offset[0] + rel_start[0], self.floating_offset[1] + rel_start[1])
+                abs_end = (self.floating_offset[0] + rel_end[0], self.floating_offset[1] + rel_end[1])
+                c1, r1 = abs_start
+                c2, r2 = abs_end
+                
+                if (start_col <= c1 < end_col and start_row <= r1 < end_row) or (start_col <= c2 < end_col and start_row <= r2 < end_row):
+                    x1 = c1 * self.cell_size - self.cam_x + self.cell_size / 2
+                    y1 = r1 * self.cell_size - self.cam_y + self.cell_size / 2
+                    x2 = c2 * self.cell_size - self.cam_x + self.cell_size / 2
+                    y2 = r2 * self.cell_size - self.cam_y + self.cell_size / 2
+                    
+                    tool_name = item["tool"]
+                    color = self.tools.get(tool_name, ["black"])[0]
+                    line_width = max(2, int(self.cell_size / 8))
+                    
+                    r_start = line_width * 1.5
+                    self.canvas.create_oval(x1 - r_start, y1 - r_start, x1 + r_start, y1 + r_start, fill=color, outline=color)
+                    
+                    arrow_size = max(8, int(self.cell_size / 4))
+                    arrow_shape = (arrow_size, arrow_size + 2, max(3, arrow_size // 3))
+                    
+                    self.canvas.create_line(
+                        x1, y1, x2, y2, 
+                        fill=color, 
+                        width=line_width, 
+                        arrow=tk.LAST, 
+                        arrowshape=arrow_shape
+                    )
+                    
+                    if self.cell_size >= self.min_cell_size_text:
+                        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+                        self.canvas.create_text(mx, my, text=tool_name, fill=color, font=("Arial", max(8, int(self.cell_size/6)), "bold"))
         self.update_selection_rect_visual()
 
     def copy_selection(self, event=None):
-        if self.floating_data:
-            self.clipboard = {k: {"tool": v["tool"], "props": v["props"].copy()} for k, v in self.floating_data.items()}
+        if self.floating_data or self.floating_lines:
+            self.clipboard = {
+                "cells": {k: {"tool": v["tool"], "props": v["props"].copy()} for k, v in (self.floating_data or {}).items()},
+                "lines": {k: {"tool": v["tool"], "props": v["props"].copy()} for k, v in (self.floating_lines or {}).items()}
+            }
         elif self.selection:
             min_c, min_r, max_c, max_r = self.selection
-            self.clipboard = {}
+            cells_clip = {}
             for r in range(min_r, max_r + 1):
                 for c in range(min_c, max_c + 1):
                     loc = (c, r)
                     if loc in self.grid_data:
-                        self.clipboard[(c - min_c, r - min_r)] = {
+                        cells_clip[(c - min_c, r - min_r)] = {
                             "tool": self.grid_data[loc]["tool"],
                             "props": self.grid_data[loc]["props"].copy()
                         }
-        print("Выделение скопировано.")
+            
+            lines_clip = {}
+            for (start_loc, end_loc), item in self.grid_lines.items():
+                c1, r1 = start_loc
+                c2, r2 = end_loc
+                # Копируем линии, у которых оба конца находятся внутри прямоугольника выделения
+                if (min_c <= c1 <= max_c and min_r <= r1 <= max_r) and (min_c <= c2 <= max_c and min_r <= r2 <= max_r):
+                    rel_start = (c1 - min_c, r1 - min_r)
+                    rel_end = (c2 - min_c, r2 - min_r)
+                    lines_clip[(rel_start, rel_end)] = {
+                        "tool": item["tool"],
+                        "props": item["props"].copy()
+                    }
+            
+            self.clipboard = {"cells": cells_clip, "lines": lines_clip}
+        print("Выделение (ячейки и линии) скопировано.")
 
     def cut_selection(self, event=None):
-        if not self.selection and not self.floating_data:
+        if not self.selection and not self.floating_data and not self.floating_lines:
             return
         self.copy_selection()
         if self.selection:
             min_c, min_r, max_c, max_r = self.selection
             has_elements = any((c, r) in self.grid_data for r in range(min_r, max_r + 1) for c in range(min_c, max_c + 1))
-            if has_elements:
+            has_lines = any((min_c <= c1 <= max_c and min_r <= r1 <= max_r) and (min_c <= c2 <= max_c and min_r <= r2 <= max_r) for (c1, r1), (c2, r2) in self.grid_lines.keys())
+            
+            if has_elements or has_lines:
                 self.save_state()
-            self.floating_data = {}
-            for r in range(min_r, max_r + 1):
-                for c in range(min_c, max_c + 1):
-                    loc = (c, r)
-                    if loc in self.grid_data:
-                        self.floating_data[(c - min_c, r - min_r)] = {
-                            "tool": self.grid_data[loc]["tool"],
-                            "props": self.grid_data[loc]["props"].copy()
+                self.floating_data = {}
+                self.floating_lines = {}
+                
+                for r in range(min_r, max_r + 1):
+                    for c in range(min_c, max_c + 1):
+                        loc = (c, r)
+                        if loc in self.grid_data:
+                            self.floating_data[(c - min_c, r - min_r)] = {
+                                "tool": self.grid_data[loc]["tool"],
+                                "props": self.grid_data[loc]["props"].copy()
+                            }
+                            del self.grid_data[loc]
+                
+                lines_to_cut = []
+                for (start_loc, end_loc), item in self.grid_lines.items():
+                    c1, r1 = start_loc
+                    c2, r2 = end_loc
+                    if (min_c <= c1 <= max_c and min_r <= r1 <= max_r) and (min_c <= c2 <= max_c and min_r <= r2 <= max_r):
+                        rel_start = (c1 - min_c, r1 - min_r)
+                        rel_end = (c2 - min_c, r2 - min_r)
+                        self.floating_lines[(rel_start, rel_end)] = {
+                            "tool": item["tool"],
+                            "props": item["props"].copy()
                         }
-                        del self.grid_data[loc]
-            self.floating_offset = (min_c, min_r)
-            self.selection = None
-            self.mark_dirty()
-            self.redraw_canvas()
+                        lines_to_cut.append((start_loc, end_loc))
+                
+                for k in lines_to_cut:
+                    del self.grid_lines[k]
+                    
+                self.floating_offset = (min_c, min_r)
+                self.selection = None
+                self.mark_dirty()
+                self.redraw_canvas()
         print("Выделение вырезано.")
 
     def paste_selection(self, event=None):
         if not self.clipboard:
             return
         self.commit_floating()
-        self.floating_data = {k: {"tool": v["tool"], "props": v["props"].copy()} for k, v in self.clipboard.items()}
+        self.floating_data = {k: {"tool": v["tool"], "props": v["props"].copy()} for k, v in self.clipboard.get("cells", {}).items()}
+        self.floating_lines = {k: {"tool": v["tool"], "props": v["props"].copy()} for k, v in self.clipboard.get("lines", {}).items()}
         self.floating_offset = (self.mouse_col, self.mouse_row)
         self.mark_dirty()
         self.redraw_canvas()
         print("Вставлено в режиме выделения.")
 
     def delete_selection(self, event=None):
-        if self.floating_data:
+        if self.floating_data or self.floating_lines:
             self.save_state()
             self.floating_data = None
+            self.floating_lines = None
             self.selection = None
             if self.sel_rect_id:
                 self.canvas.delete(self.sel_rect_id)
@@ -915,42 +1292,111 @@ class GridApp:
         elif self.selection:
             min_c, min_r, max_c, max_r = self.selection
             has_elements = any((c, r) in self.grid_data for r in range(min_r, max_r + 1) for c in range(min_c, max_c + 1))
-            if has_elements:
+            has_lines = any((min_c <= c1 <= max_c and min_r <= r1 <= max_r) and (min_c <= c2 <= max_c and min_r <= r2 <= max_r) for (c1, r1), (c2, r2) in self.grid_lines.keys())
+            
+            if has_elements or has_lines:
                 self.save_state()
                 for r in range(min_r, max_r + 1):
                     for c in range(min_c, max_c + 1):
                         loc = (c, r)
                         if loc in self.grid_data:
                             del self.grid_data[loc]
+                
+                lines_to_delete = []
+                for (start_loc, end_loc) in self.grid_lines.keys():
+                    c1, r1 = start_loc
+                    c2, r2 = end_loc
+                    if (min_c <= c1 <= max_c and min_r <= r1 <= max_r) and (min_c <= c2 <= max_c and min_r <= r2 <= max_r):
+                        lines_to_delete.append((start_loc, end_loc))
+                for k in lines_to_delete:
+                    del self.grid_lines[k]
+                    
                 self.commit_floating()
                 self.mark_dirty()
         print("Удалено.")
 
-    def during_move(self, event):
-        if not getattr(self, 'move_start_mouse', None) or not self.floating_data:
-            return
-        world_x = event.x + self.cam_x
-        world_y = event.y + self.cam_y
-        col = int(world_x // self.cell_size)
-        row = int(world_y // self.cell_size)
-        
-        diff_c = col - self.move_start_mouse[0]
-        diff_r = row - self.move_start_mouse[1]
-        
-        self.floating_offset = (
-            self.initial_offset[0] + diff_c,
-            self.initial_offset[1] + diff_r
-        )
-        self.mark_dirty()
+    def commit_floating(self):
+        has_changed = False
+        if self.floating_data:
+            self.save_state()
+            for (rel_c, rel_r), item in self.floating_data.items():
+                abs_c = self.floating_offset[0] + rel_c
+                abs_r = self.floating_offset[1] + rel_r
+                self.grid_data[(abs_c, abs_r)] = {
+                    "tool": item["tool"],
+                    "props": item["props"].copy()
+                }
+            self.floating_data = None
+            has_changed = True
+            
+        if self.floating_lines:
+            if not has_changed:
+                self.save_state()
+            for (rel_start, rel_end), item in self.floating_lines.items():
+                abs_start = (self.floating_offset[0] + rel_start[0], self.floating_offset[1] + rel_start[1])
+                abs_end = (self.floating_offset[0] + rel_end[0], self.floating_offset[1] + rel_end[1])
+                self.grid_lines[(abs_start, abs_end)] = {
+                    "tool": item["tool"],
+                    "props": item["props"].copy()
+                }
+            self.floating_lines = None
+            has_changed = True
+
+        if has_changed:
+            self.mark_dirty()
+            
+        self.selection = None
+        if self.sel_rect_id:
+            self.canvas.delete(self.sel_rect_id)
+            self.sel_rect_id = None
         self.redraw_canvas()
 
 
-from auto_arras.config import EDITOR_TOOLS, EDITOR_TOOL_TO_ID
+    def during_move(self, event):
+        if self.is_moving_selection and (self.floating_data is not None or self.floating_lines is not None):
+            world_x = event.x + self.cam_x
+            world_y = event.y + self.cam_y
+            col = int(world_x // self.cell_size)
+            row = int(world_y // self.cell_size)
+            
+            dx = col - self.move_start_mouse[0]
+            dy = row - self.move_start_mouse[1]
+            
+            self.floating_offset = (self.initial_offset[0] + dx, self.initial_offset[1] + dy)
+            self.redraw_canvas()
 
-def export(grid_data):
+
+from auto_arras.config import EDITOR_TOOLS, EDITOR_TOOL_TO_ID, EDITOR_TOOL_TO_GROUP
+
+def export(exported_layers):
+    print(f'ecp{exported_layers}')
     ret = []
-    for pos, data in grid_data.items():
-        ret.append(f"type_wall {pos[0]} {pos[1]} {EDITOR_TOOL_TO_ID[data['tool']]}")
+    for layer in exported_layers:
+        lines = layer['lines']
+        layer = layer['data']
+        print(layer)
+        for pos, data in layer.items():
+            tool = data['tool']
+            props = data['props']
+            group = EDITOR_TOOL_TO_GROUP[tool]
+            match group:
+                case "WALLS":
+                    if tool == "PRWALL":
+                        ret.append(f"wall {pos[0]} {pos[1]}")
+                    else:
+                        if props["CHANGE TYPE"] == '1':
+                            ret.append(f"wall_type {pos[0]} {pos[1]} {EDITOR_TOOL_TO_ID[tool]}")
+                        else:
+                            ret.append(f"type_wall {pos[0]} {pos[1]} {EDITOR_TOOL_TO_ID[tool]}")
+                case "OTHER":
+                    if tool == "POLY":
+                        if props["CHANGE TYPE"] == '0':
+                            ret.append(f"polygon {pos[0]} {pos[1]} {props["CLASS"]} {props["SIZE"]} {props["TIER"]}")
+                        else:
+                            ret.append(f"polygon_type {pos[0]} {pos[1]} {props["CLASS"]} {props["SIZE"]} {props["TIER"]}")
+        for poses, data in lines.items():
+            tool = data['tool']
+            ret.append(f"joint {poses[0][0]} {poses[0][1]} {poses[1][0]} {poses[1][1]} {EDITOR_TOOL_TO_ID[tool]}")
     ret = '\n'.join(ret)
     return ret
     
@@ -965,19 +1411,25 @@ if __name__ == "__main__":
         for name, tool in tools.items():
             col = tool[0]
             try:
-                props = tool[1]
+                props = tool[1:]
             except IndexError:
-                props = []
+                props = [list(),]
+            if len(props) == 0:
+                props = [[]]
+            if group in ["WALLS", "OTHER"]:
+                props[0].append("CHANGE TYPE")
             r, g, b, a = col
-            my_custom_tools[group][name] = [f"#{b:02x}{g:02x}{r:02x}", props]
-            print(my_custom_tools)
+            print(*props)
+            my_custom_tools[group][name] = [f"#{b:02x}{g:02x}{r:02x}", *props]
+    print(f"{my_custom_tools=}")
+    print(f"{EDITOR_TOOL_TO_ID=}")
     
     # Передаем наш словарь в параметр `tools`
     app = GridApp(
         root, 
         cell_size=25, 
         tools=my_custom_tools,
-        min_cell_size_grid=20,
+        min_cell_size_grid=25,
         min_cell_size_text=18,
         min_cell_size_marker=20
     )

@@ -11,7 +11,7 @@ from .utils.optimize_indexes import to_walls, get_squares, color_squares, read_s
 from .utils.image_manipulation import (
     resize_image, quantize_to_palette, black_and_white,
 )
-from .config import WALL_COLORS, WALL_TYPE_COLORS
+from .config import WALL_COLORS, WALL_TYPE_COLORS, POLYGON_SIZE_COUNT, POLYGON_TIER_COUNT, POLYGON_TYPE_COUNT
 from .utils.util_types import FilePathType
 from .utils.template_utils import save_template
 from .utils.gen_utils import compile_template
@@ -23,7 +23,7 @@ app = typer.Typer()
 
 
 @app.callback()
-def generate(save_path: typer.FileTextWrite = "template.txt", print_result: bool = False):
+def generate(save_path: Annotated[Optional[typer.FileTextWrite], typer.Option("--save-path", "-s")] = "template.txt", print_result: bool = False):
     """Generates template and saves it in file."""
     
     
@@ -126,6 +126,16 @@ def ruler(ruler_length: int):
         template.append(command)
 
     return template
+
+@app.command()
+def polygons():
+    """Generates a grid of polygons of different type size and tier"""
+    ret = []
+    for a in range(POLYGON_TYPE_COUNT):
+        for b in range(POLYGON_SIZE_COUNT):
+            for c in range(POLYGON_TIER_COUNT):
+                ret.append(f"polygon {a*2+c*2} {b*2} {a} {b} {c}")
+    return ret
 
 @app.command()
 def compile(template: typer.FileText):
