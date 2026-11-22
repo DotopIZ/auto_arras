@@ -43,6 +43,7 @@ def get_micro_instructions(instruction) -> list[str]:
                 4: (
                     f'm {i[0]} {i[1]}',
                     'p x',
+                    
                     f'lm {i[2]} {i[3]}',
                     'r x',
                 )
@@ -92,7 +93,6 @@ def get_micro_instructions(instruction) -> list[str]:
                     f'm {i[0]} {i[1]}',
                     'p x',
                     'lt c',
-                    's',
                     f'lm {i[2]} {i[3]}',
                     'r x',
                 ),
