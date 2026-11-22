@@ -1,6 +1,7 @@
 # auto_arras
 
 A tool for automating actions in the arras.io sandbox.
+This is a macro generator and runner, NOT a script 
 
 ## Quick start
 
