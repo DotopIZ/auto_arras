@@ -71,7 +71,7 @@ def image(
     
     if optimize:
         if color:
-            image_template, wall_count = color_squares(img, joint=joint)
+            image_template, wall_count = color_squares(img, backgr=True, joint=joint)
         else:
             image_template, skip, wall_count = get_squares(img, True, joint=joint)
     else:

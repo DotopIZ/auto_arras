@@ -37,16 +37,18 @@ def get_squares(img: Image.Image, trnsp: bool = False, color: int | None = None,
     result_squares = []
     ret = []
     wall_count = 0
+    first = 1
     for index, square in enumerate(squares):
         size, x, y = square
-        if not skip_mask[y, x]:
+        if skip_mask[y, x] != True:
             skip_mask[y:(y + size), x:(x + size)] = 1
             result_squares.append((square))
             wall_count += 1
             if color is None:
                 ret.append(f"wall {x} {y} {(x + size - 1)} {(y + size - 1)}")
             else:
-                if index == 0:
+                if first == 1:
+                    first = 0
                     ret.append(f"color_wall {x} {y} {(x + size - 1)} {(y + size - 1)} {color}")
                 else:
                     ret.append(f"color_wall {x} {y} {(x + size - 1)} {(y + size - 1)}")
@@ -74,6 +76,7 @@ def color_squares(img: Image.Image, backgr: bool = False, joint: bool = True):
     if joint:
         ret.append("wall -1 -1")
     for color in colors:
+        #print(backgr, color)
         if backgr:
             color_img = ImageChops.logical_or(color[2], color_img)
             sqcode, ret_skip_mask, wall_countr = get_squares(color_img, color=color[0], skip_mask=skip_mask, joint=joint)
