@@ -364,8 +364,10 @@ def exec_instruction(
         case 'sj':
             select_joint(args[0], press_interval)
         case 's':
+            pass
             #sleep(press_interval)
         case 'ls':
+            pass
             #sleep(press_interval*3)
 
 
