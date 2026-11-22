@@ -96,4 +96,4 @@ TANK_FOV = {
     'spectator': 0.43278
 }
 
-MAX_WALL_SIZE = 64
+MAX_WALL_SIZE = 32
