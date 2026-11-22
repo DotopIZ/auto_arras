@@ -93,6 +93,7 @@ def get_micro_instructions(instruction) -> list[str]:
                     f'm {i[0]} {i[1]}',
                     'p x',
                     'lt c',
+                    's',
                     f'lm {i[2]} {i[3]}',
                     'r x',
                 ),
@@ -341,7 +342,7 @@ def exec_instruction(
             kc.release(args[0])
         case 'lt':
             kc.press(args[0])
-            sleep(press_interval*2)
+            sleep(press_interval*1)
             kc.release(args[0])
         case 'm':
             mc.position = wall_pos_to_px(args[:2], wall_px_size, mouse_og_pos)
@@ -375,11 +376,12 @@ def paste(
     arena_size: Annotated[Optional[int], typer.Option("--arena-size", "-s")] = 64,
     lvl: int = 45,
     tank: str = 'spectator',
-    press_interval: Annotated[Optional[float], typer.Option("--press-interval", "-p")] = 0.05,
+    press_interval: Annotated[Optional[float], typer.Option("--press-interval", "-p")] = 0.03,
     seconds_before_paste: float = 5,
     grid_search_radius: int = 20,
     snap_to_grid: bool = False,
     snap_offset: float = 0.5,
+    anchor_grid: bool = True,
 ):
     """Pastes template in arras.io from text or file."""
     
@@ -418,7 +420,14 @@ OR ELSE THE MACRO WILL WORK WRONG.""")
             mc.position = mouse_og_pos
 
     #sleep(1)
-    
+    if anchor_grid:
+        template[0:0] = [
+            'wall 0 0',
+            't w',
+            'wall -1 -1',
+            'wall 0 0',
+        ]
+
     cur_joint = 0
 
     kc.press('`')

@@ -50,7 +50,7 @@ def image(
     keep_aspect_ratio: Annotated[Optional[bool], typer.Option("--keep-aspect-ratio/--dont-keep-aspect-ratio", "-k/-K")] = True,
     color: Annotated[Optional[bool], typer.Option("--colorful/--colorless", "-c/-C")] = True,
     dither: Annotated[Optional[bool], typer.Option("--dither", "-d")] = False,
-    resample:  Annotated[Optional[bool], typer.Option("--resample", "-s")] = False,
+    resample:  Annotated[Optional[bool], typer.Option("--resample", "-s")] = True,
     bw_threshold: Annotated[Optional[int], typer.Option("--b&w_threshold", "-b")] = 127,
     bw_invert: Annotated[Optional[bool], typer.Option("--invert/--dont-invert", "-i/-I")] = False,
     optimize: Annotated[Optional[bool], typer.Option("--optimize/--dont-optimize", "-o/-O")] = True,

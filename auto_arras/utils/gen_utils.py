@@ -25,4 +25,4 @@ def compile_template(template: list[str]):
 
 def compile_template(template):
     # Do fucking nothing
-    return template
+    return list(template)
