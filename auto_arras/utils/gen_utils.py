@@ -1,3 +1,4 @@
+"""
 from . import template_aliases
 
 def alias_template(template: list[str]):
@@ -20,4 +21,8 @@ def compile_template(template: list[str]):
     changed = 1
     while changed:
         template, changed = alias_template(template)
+    return template"""
+
+def compile_template(template):
+    # Do fucking nothing
     return template
