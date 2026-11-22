@@ -51,8 +51,8 @@ def image(
     color: Annotated[Optional[bool], typer.Option("--colorful/--colorless", "-c/-C")] = True,
     dither: Annotated[Optional[bool], typer.Option("--dither", "-d")] = False,
     resample:  Annotated[Optional[bool], typer.Option("--resample", "-s")] = False,
-    bw_threshold: int = 127,
-    bw_invert: bool = False,
+    bw_threshold: Annotated[Optional[int], typer.Option("--b&w_threshold", "-b")] = 127,
+    bw_invert: Annotated[Optional[bool], typer.Option("--invert/--dont-invert", "-i/-I")] = False,
     optimize: Annotated[Optional[bool], typer.Option("--optimize/--dont-optimize", "-o/-O")] = True,
     preview: Annotated[Optional[bool], typer.Option("--preview/--dont-preview", "-p/-P")] = True,
     joint: bool = False,
@@ -76,12 +76,11 @@ def image(
             image_template, skip, wall_count = get_squares(img, True, joint=joint)
     else:
         image_template, wall_count = to_walls(img)
-    print(f"Сгенерерировано {wall_count} стен, чтоб стереть напиши 'main.py generate v.txt cleare {wall_count}' и затем 'main.py paste --press-interval 0.01 v.txt'")
-    if wall_count > 5000:
-        print(f"Изображение не получится полностью вставить, так как оно превысило лимит стен({wall_count}/5000). Попробуй выключить dither и resample, а также уменьшить resize")
+    print(f"Сгенерерировано {wall_count} стен, чтоб стереть напиши 'python main.py generate clear {wall_count}' и затем 'python main.py paste'")
 
     if preview:
         print("Открыто превью полученного изображение")
+        img.save("preview.png") # in case img.show doesnt work
         img.show("Превью полученного изображения")
 
     return image_template

@@ -14,15 +14,6 @@ from ..config import WALL_COLORS, wall_colors_to_index, WALL_TYPE_COLORS
 import numpy as np
 from PIL import Image
 
-import numpy as np
-from PIL import Image
-
-import numpy as np
-from PIL import Image
-
-import numpy as np
-from PIL import Image
-
 def quantize_rgba(
     image: Image.Image,
     palette: list[tuple[int, int, int, int]],
@@ -90,7 +81,7 @@ def quantize_to_palette(silf, palette, dither=False):
 
 def black_and_white(img: Image.Image, palette, threshold, invert: bool = False):
     img = img.convert("L")
-    img.paste()
+    #img.paste()
     if invert:
         img = img.point(lambda i: 255 if i < threshold else 20)
     else:

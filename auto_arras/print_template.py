@@ -92,6 +92,7 @@ def get_micro_instructions(instruction) -> list[str]:
                     f'm {i[0]} {i[1]}',
                     'p x',
                     'lt c',
+                    's',
                     f'lm {i[2]} {i[3]}',
                     'r x',
                 ),
@@ -101,6 +102,7 @@ def get_micro_instructions(instruction) -> list[str]:
                     'p c',
                     f'cm {i[4]}',
                     'r c',
+                    's',
                     f'lm {i[2]} {i[3]}',
                     'r x',
                 ),
@@ -187,12 +189,15 @@ def get_micro_instructions(instruction) -> list[str]:
                     'r z',
                 )
             },
+            'team': {
+                0: (
+                    't y',
+                )
+            }
         }
     except ValueError:
         return [com]
 
-    if command == "joint":
-        print(cur_joint, i[2])
     try:
         return MICRO_INSTRUCTIONS_TABLE[command][arg_len]
     except KeyError:
@@ -229,9 +234,7 @@ def get_px_wall_size(
     lvl: int
 ) -> float:
     wall_size = apply_fov(arena_size, tank)
-    print(f'FOV: {wall_size}')
     wall_size = apply_lvl(wall_size, lvl)
-    print(f'LVL: {wall_size}')
     wall_size = apply_screen_height(wall_size)
     return wall_size
 
@@ -276,7 +279,7 @@ def polygon_size_move(siz, wall_px_size, offset=(0, 0)):
     size = (siz + POLYGON_SIZE_COUNT - cur_polygon[1]) % POLYGON_SIZE_COUNT
     cur_polygon[1] = siz
     w_offset = (size * POLYGON_SIZE_MOVE_OFFSET, 0)
-    print(cur_polygon, 'a', size)
+    #print(cur_polygon, 'a', size)
     return wall_pos_to_px(w_offset, wall_px_size, offset)
 
 def polygon_tier_move(tier, wall_px_size, offset=(0, 0)):
@@ -285,7 +288,7 @@ def polygon_tier_move(tier, wall_px_size, offset=(0, 0)):
     size = (tier + POLYGON_TIER_COUNT - cur_polygon[2]) % POLYGON_TIER_COUNT
     cur_polygon[2] = tier
     w_offset = (size * POLYGON_TIER_MOVE_OFFSET * 0.70710678, size * POLYGON_TIER_MOVE_OFFSET * 0.70710678)
-    print(cur_polygon, 'a', size)
+    #print(cur_polygon, 'a', size)
     return wall_pos_to_px(w_offset, wall_px_size, offset)
 
 def polygon_class_move(typ, wall_px_size, offset=(0, 0)):
@@ -294,7 +297,7 @@ def polygon_class_move(typ, wall_px_size, offset=(0, 0)):
     size = (typ + POLYGON_TYPE_COUNT - cur_polygon[0]) % POLYGON_TYPE_COUNT
     cur_polygon[0] = typ
     w_offset = (size * POLYGON_TYPE_MOVE_OFFSET * -0.70710678, size * POLYGON_TYPE_MOVE_OFFSET * 0.70710678)
-    print(cur_polygon, 'a', size)
+    #print(cur_polygon, 'a', size)
     return wall_pos_to_px(w_offset, wall_px_size, offset)
 
 def select_joint(joint, press_interval):
@@ -372,7 +375,7 @@ def paste(
     arena_size: Annotated[Optional[int], typer.Option("--arena-size", "-s")] = 64,
     lvl: int = 45,
     tank: str = 'spectator',
-    press_interval: float = 0.05,
+    press_interval: Annotated[Optional[float], typer.Option("--press-interval", "-p")] = 0.05,
     seconds_before_paste: float = 5,
     grid_search_radius: int = 20,
     snap_to_grid: bool = False,
@@ -421,7 +424,6 @@ OR ELSE THE MACRO WILL WORK WRONG.""")
     kc.press('`')
     for instruction in template:
         micro_instructions = get_micro_instructions(instruction)
-        print(f"{instruction=} {micro_instructions=}")
         for micro_instruction in micro_instructions:
             exec_instruction(
                 micro_instruction, wall_px_size, mouse_og_pos, press_interval

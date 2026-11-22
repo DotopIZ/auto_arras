@@ -1082,8 +1082,8 @@ class GridApp:
                         color = self.tools.get(tool_name, ["white", []])[0]
                         self.canvas.create_rectangle(x1, y1, x2, y2, fill=color)
                         already_drew.add(loc)
-                        #if self.cell_size >= self.min_cell_size_text:
-                        #    self.canvas.create_text(x1 + self.cell_size/2, y1 + self.cell_size/2, text=f'{tool_name}\n{data}', fill=self.get_contrast_color(color), font=("Arial", int(self.cell_size/len(tool_name)), "bold"))
+                        if self.cell_size >= self.min_cell_size_text:
+                            self.canvas.create_text(x1 + self.cell_size/2, y1 + self.cell_size/2, text=f'{tool_name}', fill=self.get_contrast_color(color), font=("Arial", int(self.cell_size/len(tool_name)), "bold"))
 
             if self.cell_size >= self.min_cell_size_text:
             # Отрисовка линий (связей)
@@ -1219,7 +1219,6 @@ class GridApp:
                     }
             
             self.clipboard = {"cells": cells_clip, "lines": lines_clip}
-        print("Выделение (ячейки и линии) скопировано.")
 
     def cut_selection(self, event=None):
         if not self.selection and not self.floating_data and not self.floating_lines:
@@ -1265,7 +1264,6 @@ class GridApp:
                 self.selection = None
                 self.mark_dirty()
                 self.redraw_canvas()
-        print("Выделение вырезано.")
 
     def paste_selection(self, event=None):
         if not self.clipboard:
@@ -1276,7 +1274,6 @@ class GridApp:
         self.floating_offset = (self.mouse_col, self.mouse_row)
         self.mark_dirty()
         self.redraw_canvas()
-        print("Вставлено в режиме выделения.")
 
     def delete_selection(self, event=None):
         if self.floating_data or self.floating_lines:
@@ -1313,7 +1310,6 @@ class GridApp:
                     
                 self.commit_floating()
                 self.mark_dirty()
-        print("Удалено.")
 
     def commit_floating(self):
         has_changed = False
@@ -1369,12 +1365,10 @@ class GridApp:
 from auto_arras.config import EDITOR_TOOLS, EDITOR_TOOL_TO_ID, EDITOR_TOOL_TO_GROUP
 
 def export(exported_layers):
-    print(f'ecp{exported_layers}')
     ret = []
     for layer in exported_layers:
         lines = layer['lines']
         layer = layer['data']
-        print(layer)
         for pos, data in layer.items():
             tool = data['tool']
             props = data['props']
@@ -1386,6 +1380,8 @@ def export(exported_layers):
                     else:
                         if props["CHANGE TYPE"] == '1':
                             ret.append(f"wall_type {pos[0]} {pos[1]} {EDITOR_TOOL_TO_ID[tool]}")
+                        elif props["CHANGE TYPE"] == '2':
+                            ret.append(f"wall {pos[0]} {pos[1]}")
                         else:
                             ret.append(f"type_wall {pos[0]} {pos[1]} {EDITOR_TOOL_TO_ID[tool]}")
                 case "OTHER":
@@ -1394,6 +1390,8 @@ def export(exported_layers):
                             ret.append(f"polygon {pos[0]} {pos[1]} {props["CLASS"]} {props["SIZE"]} {props["TIER"]}")
                         else:
                             ret.append(f"polygon_type {pos[0]} {pos[1]} {props["CLASS"]} {props["SIZE"]} {props["TIER"]}")
+            if "TEAM" in props and props["TEAM"] == '1':
+                ret.append(f"team")
         for poses, data in lines.items():
             tool = data['tool']
             ret.append(f"joint {poses[0][0]} {poses[0][1]} {poses[1][0]} {poses[1][1]} {EDITOR_TOOL_TO_ID[tool]}")
@@ -1417,12 +1415,9 @@ if __name__ == "__main__":
             if len(props) == 0:
                 props = [[]]
             if group in ["WALLS", "OTHER"]:
-                props[0].append("CHANGE TYPE")
+                props[0].extend(["CHANGE TYPE", "TEAM"])
             r, g, b, a = col
-            print(*props)
             my_custom_tools[group][name] = [f"#{b:02x}{g:02x}{r:02x}", *props]
-    print(f"{my_custom_tools=}")
-    print(f"{EDITOR_TOOL_TO_ID=}")
     
     # Передаем наш словарь в параметр `tools`
     app = GridApp(

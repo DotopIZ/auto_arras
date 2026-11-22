@@ -103,23 +103,18 @@ def to_walls(img: Image.Image):
 
 
 def read_schematic(img: Image.Image):
-    print(img.palette)
     result = []
     img_width, img_height = img.size
     img_loaded = img.load()
     colors = [Image.new("1", img.size, color=0) for i in range(WALLS_TYPE_COUNT)]
-    print(colors)
     wall_count = 0
     for index, pixel in enumerate(img.getdata()):
         if pixel == WTC_TRNSP_PX_ID:
             continue
         x = index % img_width
         y = index // img_width
-        print(pixel)
         colors[pixel].putpixel((x, y), 255)
-    print(img_width, img_height)
     for i, wtype in enumerate(colors):
-        print(wtype)
         img = wtype.load()
         for y in range(img_height):
             for x in range(img_width):

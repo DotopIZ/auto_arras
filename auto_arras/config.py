@@ -66,9 +66,7 @@ EDITOR_TOOLS = {
 EDITOR_TOOL_TO_ID = {}
 
 for group, tools in EDITOR_TOOLS.items():
-    print(f"{group=}")
     for i, k in enumerate(tools.keys()):
-        print(f"{i=} {k=}")
         EDITOR_TOOL_TO_ID[k] = str(i)
 
 EDITOR_TOOL_TO_GROUP = {}
