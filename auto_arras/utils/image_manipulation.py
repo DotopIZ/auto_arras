@@ -14,69 +14,58 @@ from ..config import WALL_COLORS, wall_colors_to_index, WALL_TYPE_COLORS
 import numpy as np
 from PIL import Image
 
+from PIL import Image
+
 def quantize_rgba(
     image: Image.Image,
     palette: list[tuple[int, int, int, int]],
-    chunk_size: int = 500000, 
-    alpha_multiplier: int = 2 
+    dither: Image.Dither = Image.Dither.FLOYDSTEINBERG,
+    alpha_multiplier: int | None = None,   # сохранён для обратной совместимости, не используется
 ) -> Image.Image:
-    """Highly optimized quantization using NumPy matrix multiplication.
-    
-    :param image: Input PIL Image.
-    :param palette: List of up to 256 RGBA tuples.
-    :param chunk_size: Increased to 500k as memory footprint is now much lower.
-    :param alpha_multiplier: Scales alpha. 2 equates to an alpha weight of 4.
-    :return: Quantized PIL Image in 'P' mode with RGBA palette attached.
+    """
+    Квантует RGBA-изображение к заданной палитре с дизерингом.
+
+    Дизеринг применяется только к RGB-каналу (обходной путь из-за того,
+    что Pillow не поддерживает дизеринг при квантовании RGBA).
+    Индексы палитры, полученные для RGB-части, используются напрямую для
+    итогового P-изображения с полной RGBA-палитрой.
+
+    :param image: Исходное изображение (будет приведено к RGBA).
+    :param palette: Список до 256 цветов в формате RGBA.
+    :param dither: Метод дизеринга (Image.Dither.FLOYDSTEINBERG или Image.Dither.NONE).
+    :param alpha_multiplier: Устаревший параметр, оставлен для совместимости.
+    :return: Изображение в режиме 'P' с прикреплённой RGBA-палитрой.
     """
     if len(palette) > 256:
-        raise ValueError("PIL 'P' mode supports a maximum of 256 colors.")
+        raise ValueError("PIL 'P' mode поддерживает не более 256 цветов.")
 
-    # 1. Convert to int32 to prevent math overflow and enable fast processing
-    img_np = np.array(image.convert("RGBA"), dtype=np.int32)
-    palette_np = np.array(palette, dtype=np.int32)
+    # 1. Приводим исходное изображение к RGBA и извлекаем RGB-часть
+    img_rgb = image.convert("RGBA").convert("RGB")
 
-    # 2. Pre-scale alpha channel to naturally weight it in Euclidean space
-    if alpha_multiplier != 1:
-        img_np[:, :, 3] *= alpha_multiplier
-        palette_np[:, 3] *= alpha_multiplier
+    # 2. Палитра только из RGB-компонент — в том же порядке, что и исходная
+    palette_rgb = [color[:3] for color in palette]
+    palette_img = Image.new("P", (1, 1))
+    flat_rgb_palette = [channel for color in palette_rgb for channel in color]
+    palette_img.putpalette(flat_rgb_palette)
 
-    height, width, _ = img_np.shape
-    pixels = img_np.reshape(-1, 4)
+    # 3. Квантуем RGB с дизерингом — получаем P-изображение с индексами палитры
+    quantized_p = img_rgb.quantize(palette=palette_img, dither=dither)
 
-    # 3. Precompute the Palette squared sum (the Y^2 in our formula)
-    # Shape becomes (P,) where P is the number of colors in the palette
-    palette_sq = np.sum(palette_np ** 2, axis=1)
+    # 4. Подменяем палитру на RGBA-версию.
+    #    Индексы не меняются (порядок цветов сохранён), а альфа теперь
+    #    берётся из палитры — как и в исходной реализации.
+    flat_rgba_palette = [channel for color in palette for channel in color]
+    quantized_p.putpalette(flat_rgba_palette, rawmode="RGBA")
 
-    closest_indices = np.empty(len(pixels), dtype=np.uint8)
-
-    # 4. Process in chunks using fast Matrix Multiplication (np.dot)
-    for i in range(0, len(pixels), chunk_size):
-        chunk = pixels[i : i + chunk_size]
-        
-        # X dot Y (Matrix multiplication is heavily optimized in NumPy)
-        # Shape: (chunk_size, 4) @ (4, P) -> (chunk_size, P)
-        xy_dot = np.dot(chunk, palette_np.T)
-        
-        # Calculate distance proxy: Y^2 - 2XY
-        # We drop X^2 because it doesn't change which palette color is closest
-        dist_proxy = palette_sq - (2 * xy_dot)
-        
-        # Find the index of the minimum distance
-        closest_indices[i : i + chunk_size] = np.argmin(dist_proxy, axis=1)
-
-    # 5. Build 'P' mode image
-    out_img = Image.fromarray(closest_indices.reshape(height, width), mode="P")
-
-    # Flatten original palette (not the scaled one) and attach
-    flat_palette = [channel for color in palette for channel in color]
-    out_img.putpalette(flat_palette, rawmode="RGBA")
-
-    return out_img
+    return quantized_p
 
 def quantize_to_palette(silf, palette, dither=False):
     """Convert an RGB or L mode image to use a given P image's palette."""
 
-    return quantize_rgba(silf, palette)
+    if dither:
+        return quantize_rgba(silf, palette)
+    else:
+        return quantize_rgba(silf, palette, dither=Image.Dither.NONE)
 
 
 def black_and_white(img: Image.Image, palette, threshold, invert: bool = False):
