@@ -341,7 +341,7 @@ def exec_instruction(
             kc.release(args[0])
         case 'lt':
             kc.press(args[0])
-            #sleep(press_interval)
+            sleep(press_interval*2)
             kc.release(args[0])
         case 'm':
             mc.position = wall_pos_to_px(args[:2], wall_px_size, mouse_og_pos)
@@ -364,11 +364,9 @@ def exec_instruction(
         case 'sj':
             select_joint(args[0], press_interval)
         case 's':
-            pass
-            #sleep(press_interval)
+            sleep(press_interval)
         case 'ls':
-            pass
-            #sleep(press_interval*3)
+            sleep(press_interval*3)
 
 
 @app.callback(invoke_without_command=True)
