@@ -61,6 +61,9 @@ EDITOR_TOOLS = {
     "OTHER": {
         "POLY": [[112, 146, 190, 255], ["CLASS", "SIZE", "TIER"]],
     },
+    "ACTIONS": {
+        "DRAG": [[120, 0, 200, 255], [], "line"]
+    }
 }
 
 EDITOR_TOOL_TO_ID = {}
