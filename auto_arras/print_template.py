@@ -376,7 +376,7 @@ def paste(
     arena_size: Annotated[Optional[int], typer.Option("--arena-size", "-s")] = 64,
     lvl: int = 45,
     tank: str = 'spectator',
-    press_interval: Annotated[Optional[float], typer.Option("--press-interval", "-p")] = 0.03,
+    press_interval: Annotated[Optional[float], typer.Option("--press-interval", "-p")] = 0.05,
     seconds_before_paste: float = 5,
     grid_search_radius: int = 20,
     snap_to_grid: bool = False,
