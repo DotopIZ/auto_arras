@@ -11,6 +11,8 @@ import pyautogui
 from PIL import ImageOps
 from .utils.gen_utils import compile_template
 from typing import Annotated, Optional
+import io
+import os
 
 from .config import TANK_FOV, WALLS_COLOR_COUNT, WALLS_TYPE_COUNT, JOINTS_TYPE_COUNT, POLYGON_SIZE_COUNT, POLYGON_TIER_COUNT, POLYGON_TYPE_COUNT, POLYGON_SIZE_MOVE_OFFSET, POLYGON_TIER_MOVE_OFFSET, POLYGON_TYPE_MOVE_OFFSET
 
@@ -24,12 +26,12 @@ kc = keyboard.Controller()
 cur_joint = 0
 cur_polygon = [0, 0, 0]
 
+
 def get_micro_instructions(instruction) -> list[str]:
     global cur_joint
     com = instruction
     tokens = instruction.split()
     command = tokens[0]
-    print(instruction)
 
     i = tokens[1:]
     arg_len = len(i)
@@ -79,8 +81,18 @@ def get_micro_instructions(instruction) -> list[str]:
                     res.append(f'm {x1} {y1}')
                 if place == '1':
                     res.append('r x')
-        print(btr_tkns)
-        print(res)
+            case 'drag':
+                x1, y1 = btr_tkns.get('x1', 'None'), btr_tkns.get('y1', 'None')
+                x2, y2 = btr_tkns.get('x2', 'None'), btr_tkns.get('y2', 'None')
+                if x1 != 'None' and y1 != 'None' and x2 != 'None' and y2 != 'None':
+                    res.extend([
+                        f'm {x1} {y1}',
+                        'p d',
+                        f'm {x2} {y2}',
+                        'r d'
+                    ])
+                else:
+                    print("invalid position")
         if res:
             return res
     i.extend([0] * (5 - arg_len))
@@ -421,6 +433,115 @@ def exec_instruction(
             sleep(press_interval*3)
 
 
+def _as_file_obj(template):
+    """file-like → как есть; путь → open; строка-контент → StringIO.
+
+    Returns: (file_obj, need_close).
+    """
+    if hasattr(template, "read"):
+        return template, False
+    if isinstance(template, str):
+        if os.path.isfile(template):
+            return open(template, "r", encoding="utf-8"), True
+        strio = io.StringIO(template), True
+        return strio
+    raise TypeError(f"Unsupported template type: {type(template).__name__}")
+
+def paste_template(
+    template,
+    arena_size: int = 64,
+    lvl: int = 45,
+    tank: str = 'spectator',
+    press_interval: float = 0.05,
+    seconds_before_paste: float = 5,
+    grid_search_radius: int = 20,
+    snap_to_grid: bool = False,
+    snap_offset: float = 0.5,
+    anchor_grid: bool = True,
+    do_warning: bool = True,
+    warning_callback=None,
+):
+    """Ядро вставки. Вызывается и из CLI, и из GUI.
+
+    warning_callback(seconds) -> bool, если задан — вместо input().
+    """
+    # FIX: глобалы сбрасывались локально (тень) — вставка ломалась при повторном вызове.
+    global cur_joint, cur_polygon
+
+    file_obj, need_close = _as_file_obj(template)
+    try:
+        template_lines = compile_template(file_obj)
+    finally:
+        if need_close:
+            try:
+                file_obj.close()
+            except Exception:
+                pass
+
+    if do_warning:
+        if warning_callback is not None:
+            if not warning_callback(seconds_before_paste):
+                return
+        else:
+            try:
+                input(f"""Press enter to paste. It will start after {seconds_before_paste} seconds.
+NOTE: BEFORE PASTING STARTS YOU NEED TO:
+- BE IN FULLSCREEN MODE OF ARRAS.IO
+- HAVE FORCE 16:9 ASPECT RATIO ENABLED(arras.io Settings > Secrets)
+- HAVE DEFAULT ZOOM FOR YOUR TANK
+- HAVE TANK {tank}
+- HAVE LEVEL {lvl}
+OR ELSE THE MACRO WILL WORK WRONG.""")
+            except EOFError:
+                return
+
+    sleep(seconds_before_paste)
+
+    wall_px_size: float = get_px_wall_size(arena_size, tank, lvl)
+    mouse_og_pos = mc.position
+
+    if snap_to_grid:
+        grid_screenshot = pyautogui.screenshot(region=(
+            mouse_og_pos[0] - grid_search_radius,
+            mouse_og_pos[1] - grid_search_radius,
+            grid_search_radius * 2,
+            grid_search_radius * 2
+        ))
+        corner_color = 211
+        grid_corner = find_pixel(grid_screenshot, corner_color)
+        snap_offset = max(snap_offset * wall_px_size, 27.69792)
+        if grid_corner is not None:
+            mouse_og_pos = (
+                grid_corner[0] + mouse_og_pos[0] - grid_search_radius + wall_px_size / 2,
+                grid_corner[1] + mouse_og_pos[1] - grid_search_radius + wall_px_size / 2
+            )
+            mc.position = mouse_og_pos
+
+    if anchor_grid:
+        template_lines[0:0] = [
+            'wall 0 0',
+            't w',
+            'wall -1 -1',
+            'wall 0 0',
+        ]
+
+    cur_joint = 0
+    cur_polygon = [0, 0, 0]
+
+    kc.press('`')
+    try:
+        for instruction in template_lines:
+            print(f"{instruction=}")
+            micro_instructions = get_micro_instructions(instruction)
+            for micro_instruction in micro_instructions:
+                exec_instruction(
+                    micro_instruction, wall_px_size, mouse_og_pos, press_interval
+                )
+                sleep(press_interval)
+    finally:
+        # FIX: кнопка '`' отпускается даже при исключении
+        kc.release('`')
+
 @app.callback(invoke_without_command=True)
 def paste(
     template: Annotated[Optional[typer.FileText], typer.Option("--template", "-t")] = "template.txt",
@@ -433,60 +554,19 @@ def paste(
     snap_to_grid: bool = False,
     snap_offset: float = 0.5,
     anchor_grid: bool = True,
+    do_warning: bool = True,
 ):
     """Pastes template in arras.io from text or file."""
-    
-    template = compile_template(template)
-
-    input(f"""Press enter to paste. It will start after {seconds_before_paste} seconds.
-NOTE: BEFORE PASTING STARTS YOU NEED TO:
- - BE IN FULLSCREEN MODE OF ARRAS.IO
- - HAVE FORCE 16:9 ASPECT RATIO ENABLED(arras.io Settings > Secrets)
- - HAVE DEFAULT ZOOM FOR YOUR TANK
- - HAVE TANK {tank}
- - HAVE LEVEL {lvl}
-OR ELSE THE MACRO WILL WORK WRONG.""")
-    sleep(seconds_before_paste)
-
-    wall_px_size: float = get_px_wall_size(arena_size, tank, lvl)
-    mouse_og_pos = mc.position
-
-    if snap_to_grid:
-        # Snapping mouse to grid
-        grid_screenshot = pyautogui.screenshot(region=(
-            mouse_og_pos[0] - grid_search_radius,
-            mouse_og_pos[1] - grid_search_radius,
-            grid_search_radius * 2,
-            grid_search_radius * 2
-        ))
-
-        corner_color = 211
-        grid_corner = find_pixel(grid_screenshot, corner_color)
-        snap_offset = max(snap_offset * wall_px_size, 27.69792)
-        if grid_corner is not None:
-            mouse_og_pos = (
-                grid_corner[0] + mouse_og_pos[0] - grid_search_radius + wall_px_size/2,
-                grid_corner[1] + mouse_og_pos[1] - grid_search_radius + wall_px_size/2
-            )
-            mc.position = mouse_og_pos
-
-    #sleep(1)
-    if anchor_grid:
-        template[0:0] = [
-            'wall 0 0',
-            't w',
-            'wall -1 -1',
-            'wall 0 0',
-        ]
-
-    cur_joint = 0
-
-    kc.press('`')
-    for instruction in template:
-        micro_instructions = get_micro_instructions(instruction)
-        for micro_instruction in micro_instructions:
-            exec_instruction(
-                micro_instruction, wall_px_size, mouse_og_pos, press_interval
-            )
-            sleep(press_interval)
-    kc.release('`')
+    paste_template(
+        template=template,
+        arena_size=arena_size,
+        lvl=lvl,
+        tank=tank,
+        press_interval=press_interval,
+        seconds_before_paste=seconds_before_paste,
+        grid_search_radius=grid_search_radius,
+        snap_to_grid=snap_to_grid,
+        snap_offset=snap_offset,
+        anchor_grid=anchor_grid,
+        do_warning=do_warning,
+    )

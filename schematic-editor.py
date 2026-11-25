@@ -6,110 +6,24 @@ import copy
 import os
 
 from auto_arras.config import (
-    EDITOR_TOOLS, EDITOR_TOOL_TO_ID, EDITOR_TOOL_TO_GROUP, MAX_WALL_SIZE,
+    EDITOR_TOOLS, MAX_WALL_SIZE, WALL_COLORS,
 )
+from schematic_editor.i18n import TRANSLATIONS, translate
+from schematic_editor.chunked import ChunkedLayerData, ChunkedLayerLines
+from schematic_editor.exporter import export
+from schematic_editor.ui_helpers import rgba_list_to_hex, get_contrast_color, safe_int
+from schematic_editor.paste_dialog import PasteDialog
 
-
-# ============================================================
-#  Chunked-коллекции
-# ============================================================
-
-class _ChunkIndexBase(dict):
-    """Базовый словарь с пространственным индексом по чанкам."""
-    CHUNK_SIZE = 32
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._chunks = {}
-        for key in self.keys():
-            self._chunk_add(key)
-
-    # --- должно быть переопределено в наследниках ---
-    def _chunks_of(self, key):
-        raise NotImplementedError
-
-    # --- низкоуровневые операции с индексом ---
-    def _chunk_add(self, key):
-        for ck in self._chunks_of(key):
-            bucket = self._chunks.get(ck)
-            if bucket is None:
-                bucket = self._chunks[ck] = set()
-            bucket.add(key)
-
-    def _chunk_remove(self, key):
-        for ck in self._chunks_of(key):
-            bucket = self._chunks.get(ck)
-            if bucket is not None:
-                bucket.discard(key)
-                if not bucket:
-                    del self._chunks[ck]
-
-    def __setitem__(self, key, value):
-        if key not in self:
-            self._chunk_add(key)
-        super().__setitem__(key, value)
-
-    def __delitem__(self, key):
-        if key in self:
-            self._chunk_remove(key)
-        super().__delitem__(key)
-
-    def clear(self):
-        super().clear()
-        self._chunks.clear()
-
-    # --- обход ключей, попадающих в чанки диапазона ---
-    def _iter_chunk_keys(self, min_col, max_col, min_row, max_row):
-        cs = self.CHUNK_SIZE
-        for cx in range(min_col // cs, max_col // cs + 1):
-            for cy in range(min_row // cs, max_row // cs + 1):
-                for key in self._chunks.get((cx, cy), ()):
-                    yield key
-
-
-class ChunkedLayerData(_ChunkIndexBase):
-    """Клетки (col, row) → item."""
-    def _chunks_of(self, key):
-        cs = self.CHUNK_SIZE
-        return ((key[0] // cs, key[1] // cs),)
-
-    def cells_in_view(self, min_col, max_col, min_row, max_row):
-        for key in self._iter_chunk_keys(min_col, max_col, min_row, max_row):
-            yield key, self[key]
-
-
-class ChunkedLayerLines(_ChunkIndexBase):
-    """Линии ((c1,r1),(c2,r2)) → item."""
-    def _chunks_of(self, key):
-        (c1, r1), (c2, r2) = key
-        min_c, max_c = (c1, c2) if c1 <= c2 else (c2, c1)
-        min_r, max_r = (r1, r2) if r1 <= r2 else (r2, r1)
-        cs = self.CHUNK_SIZE
-        return ((cx, cy)
-                for cx in range(min_c // cs, max_c // cs + 1)
-                for cy in range(min_r // cs, max_r // cs + 1))
-
-    def lines_in_view(self, min_col, max_col, min_row, max_row):
-        seen = set()
-        for key in self._iter_chunk_keys(min_col, max_col, min_row, max_row):
-            if key in seen:
-                continue
-            seen.add(key)
-            yield key, self[key]
-
-
-# ============================================================
-#  Основное приложение
-# ============================================================
 
 class GridApp:
     CAMERA_SPEED = 1500.0
-    # Запас куллинга по осям: покрывает любую клетку с SIZE ≤ MAX_WALL_SIZE
     CULL_MARGIN = MAX_WALL_SIZE
 
-    def __init__(self, root, tools=None):
+    def __init__(self, root, tools=None, lang="en"):
+        self.lang = lang if lang in TRANSLATIONS else "ru"
         self.root = root
-        self.root.title("Бесконечная сетка с инструментами и экспортом")
+        self.root.title(self.t("app_title"))
+        self.lang_var = tk.StringVar(value=self.lang)
 
         # --- параметры отображения ---
         self.default_cell_size = 25
@@ -149,6 +63,7 @@ class GridApp:
         self.mouse_x = self.view_width / 2
         self.mouse_y = self.view_height / 2
         self.tool_buttons = {}
+        self._prop_traces = []  # FIX: храним trace-id для корректной очистки
 
         # --- слои и состояние ---
         self.layers = [self._create_new_layer("Слой 1")]
@@ -172,6 +87,9 @@ class GridApp:
 
         self.mouse_col = 0
         self.mouse_row = 0
+
+        # FIX: флаг «в текущем штрихе кисти уже сохранили снапшот»
+        self._stroke_saved = False
 
         # --- инструменты ---
         self.parse_tools(tools)
@@ -204,7 +122,7 @@ class GridApp:
         self.right_toolbar.pack_propagate(False)
 
         self.status_bar = tk.Label(
-            self.root, text="Координаты: (0, 0) | Масштаб: 100%",
+            self.root, text=self.t("status_bar", 0, 0, 100),
             anchor="w", bd=1, relief=tk.SUNKEN, font=("Arial", 9))
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -243,7 +161,12 @@ class GridApp:
         data = self.tools.get(name, [])
         return len(data) >= 3 and data[2] == "line"
 
-    def _get_color(self, tool_name, default="white"):
+    def _get_color(self, tool_name, default="white", prop_color='0'):
+        # FIX: защита от пустых / невалидных COLOR
+        if prop_color and prop_color != '0':
+            idx = safe_int(prop_color) - 1
+            if 0 <= idx < len(WALL_COLORS):
+                return rgba_list_to_hex(WALL_COLORS[idx], rev=True)
         data = self.tools.get(tool_name)
         return data[0] if data else default
 
@@ -252,10 +175,6 @@ class GridApp:
 
     def _event_to_cell(self, event):
         return self._world_to_cell(event.x + self.cam_x, event.y + self.cam_y)
-
-    def _selection_bounds(self):
-        """Возвращает (min_c, min_r, max_c, max_r) или None."""
-        return self.selection
 
     # ---------- итераторы по прямоугольнику (через чанки) ----------
 
@@ -297,10 +216,18 @@ class GridApp:
             self._iter_lines_in_rect_keys(min_c, min_r, max_c, max_r), None) is not None
         return has_elements, has_lines
 
+    def _lines_touching_cell(self, loc):
+        """O(1) поиск линий с концом в клетке loc."""
+        if isinstance(self.grid_lines, ChunkedLayerLines):
+            yield from self.grid_lines.lines_at_cell(loc[0], loc[1])
+        else:
+            for key in self.grid_lines:
+                if key[0] == loc or key[1] == loc:
+                    yield key
+
     # ---------- вспомогательные операции над выделением ----------
 
     def _lift_selection_to_floating(self, min_c, min_r, max_c, max_r):
-        """Вырезает содержимое прямоугольника в плавающее состояние."""
         self.floating_data = {}
         self.floating_lines = {}
 
@@ -367,7 +294,8 @@ class GridApp:
         self.current_color = color
         self.current_props_list = props
         self._highlight_tool(name)
-        self.update_right_toolbar()
+        # FIX: не пересобираем панель слоёв при смене инструмента
+        self._rebuild_props_panel()
 
     def pick_tool_at(self, col, row):
         loc = (col, row)
@@ -398,7 +326,8 @@ class GridApp:
         self.toggle_toolbar_btn.pack(side=tk.RIGHT, padx=2)
 
         self.toolbar_title = tk.Label(
-            header_frame, text="Инструменты", font=("Arial", 10, "bold"))
+            header_frame, text=self.t("toolbar_tools"),
+            font=("Arial", 10, "bold"))
         self.toolbar_title.pack(side=tk.LEFT, padx=5)
 
         self.toolbar_content = tk.Frame(self.left_toolbar)
@@ -455,8 +384,7 @@ class GridApp:
 
             toggle_btn = tk.Button(
                 grp_header, text="▼", width=2, relief=tk.FLAT, bg="#e0e0e0",
-                font=("Arial", 8),
-                command=lambda b=None, f=content_frame: None)
+                font=("Arial", 8))
             toggle_btn.config(
                 command=lambda b=toggle_btn, f=content_frame: toggle_group(b, f))
             toggle_btn.pack(side=tk.LEFT)
@@ -512,38 +440,69 @@ class GridApp:
         menubar = tk.Menu(self.root)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Новый", command=self.new_schematic, accelerator="Ctrl+N")
-        file_menu.add_command(label="Открыть", command=self.load_dictionary_file, accelerator="Ctrl+O")
-        file_menu.add_command(label="Сохранить", command=self.save_dictionary_file, accelerator="Ctrl+S")
-        menubar.add_cascade(label="Файл", menu=file_menu)
+        file_menu.add_command(label=self.t("menu_new"),
+                              command=self.new_schematic, accelerator="Ctrl+N")
+        file_menu.add_command(label=self.t("menu_open"),
+                              command=self.load_dictionary_file, accelerator="Ctrl+O")
+        file_menu.add_command(label=self.t("menu_save"),
+                              command=self.save_dictionary_file, accelerator="Ctrl+S")
+        file_menu.add_separator()
+        file_menu.add_command(label=self.t("menu_export"),
+                              command=lambda: self.export_data(), accelerator="Ctrl+E")
+        menubar.add_cascade(label=self.t("menu_file"), menu=file_menu)
 
         edit_menu = tk.Menu(menubar, tearoff=0)
-        edit_menu.add_command(label="Отменить", command=self.undo, accelerator="Ctrl+Z")
-        edit_menu.add_command(label="Повторить", command=self.redo, accelerator="Ctrl+Y")
+        edit_menu.add_command(label=self.t("menu_undo"),
+                              command=self.undo, accelerator="Ctrl+Z")
+        edit_menu.add_command(label=self.t("menu_redo"),
+                              command=self.redo, accelerator="Ctrl+Y")
         edit_menu.add_separator()
-        edit_menu.add_command(label="Вырезать", command=self.cut_selection, accelerator="Ctrl+X")
-        edit_menu.add_command(label="Копировать", command=self.copy_selection, accelerator="Ctrl+C")
-        edit_menu.add_command(label="Вставить", command=self.paste_selection, accelerator="Ctrl+V")
-        edit_menu.add_command(label="Удалить", command=self.delete_selection, accelerator="Del")
+        edit_menu.add_command(label=self.t("menu_cut"),
+                              command=self.cut_selection, accelerator="Ctrl+X")
+        edit_menu.add_command(label=self.t("menu_copy"),
+                              command=self.copy_selection, accelerator="Ctrl+C")
+        edit_menu.add_command(label=self.t("menu_paste"),
+                              command=self.paste_selection, accelerator="Ctrl+V")
+        edit_menu.add_command(label=self.t("menu_delete"),
+                              command=self.delete_selection, accelerator="Del")
         edit_menu.add_separator()
-        edit_menu.add_command(label="Выделить всё", command=self.select_all, accelerator="Ctrl+A")
-        edit_menu.add_command(label="Снять выделение", command=self.deselect_all, accelerator="Ctrl+D")
-        menubar.add_cascade(label="Правка", menu=edit_menu)
+        edit_menu.add_command(label=self.t("menu_select_all"),
+                              command=self.select_all, accelerator="Ctrl+A")
+        edit_menu.add_command(label=self.t("menu_deselect"),
+                              command=self.deselect_all, accelerator="Ctrl+D")
+        menubar.add_cascade(label=self.t("menu_edit"), menu=edit_menu)
 
         layers_menu = tk.Menu(menubar, tearoff=0)
-        layers_menu.add_command(label="Добавить слой", command=self.add_layer)
-        layers_menu.add_command(
-            label="Удалить активный слой",
-            command=lambda: self.remove_layer(self.active_layer_idx))
-        menubar.add_cascade(label="Слои", menu=layers_menu)
+        layers_menu.add_command(label=self.t("menu_add_layer"),
+                                command=self.add_layer)
+        layers_menu.add_command(label=self.t("menu_remove_layer"),
+                                command=lambda: self.remove_layer(self.active_layer_idx))
+        menubar.add_cascade(label=self.t("menu_layers"), menu=layers_menu)
 
         tools_menu = tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="Сброс камеры", command=self.reset_camera)
-        menubar.add_cascade(label="Инструменты", menu=tools_menu)
+        tools_menu.add_command(label=self.t("menu_reset_camera"),
+                               command=self.reset_camera)
+        tools_menu.add_separator()
+        tools_menu.add_command(
+            label=self.t("menu_paste_game"),
+            command=self.open_paste_dialog,
+            accelerator="Ctrl+Shift+E",
+        )
+        menubar.add_cascade(label=self.t("menu_tools"), menu=tools_menu)
 
         help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="Горячие клавиши", command=self.show_help, accelerator="F1")
-        menubar.add_cascade(label="Справка", menu=help_menu)
+        help_menu.add_command(label=self.t("menu_hotkeys"),
+                              command=self.show_help, accelerator="F1")
+        help_menu.add_separator()
+        lang_menu = tk.Menu(help_menu, tearoff=0)
+        lang_menu.add_radiobutton(
+            label=self.t("lang_ru"), value="ru", variable=self.lang_var,
+            command=lambda: self.set_language("ru"))
+        lang_menu.add_radiobutton(
+            label=self.t("lang_en"), value="en", variable=self.lang_var,
+            command=lambda: self.set_language("en"))
+        help_menu.add_cascade(label=self.t("menu_language"), menu=lang_menu)
+        menubar.add_cascade(label=self.t("menu_help"), menu=help_menu)
 
         self.menubar = menubar
         self.root.config(menu=menubar)
@@ -555,8 +514,7 @@ class GridApp:
     def new_schematic(self):
         if self.is_dirty:
             response = messagebox.askyesnocancel(
-                "Новая схематика",
-                "Есть несохранённые изменения. Сохранить их перед созданием новой схематики?")
+                self.t("msg_new_title"), self.t("msg_new_text"))
             if response is None:
                 return
             if response is True and not self.save_dictionary_file():
@@ -583,29 +541,49 @@ class GridApp:
         self._update_status()
         self.request_redraw()
 
-    def export_data(self, file_path):
+    def export_data(self, file_path=None):
         try:
             processed_data = export(self.layers)
         except Exception as e:
-            messagebox.showerror("Ошибка экспорта", f"Не удалось подготовить данные: {e}")
+            messagebox.showerror(self.t("msg_export_err_title"),
+                                 self.t("msg_export_prep_err", e))
             return False
 
         if not file_path:
-            return False
+            file_path = filedialog.asksaveasfilename(
+                title=self.t("export_dialog_title"),
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+            if not file_path:
+                return False
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 if isinstance(processed_data, (dict, list)):
                     json.dump(processed_data, f, ensure_ascii=False, indent=4)
                 else:
                     f.write(str(processed_data))
-            print(f"Данные успешно экспортированы в {file_path}")
+            print(self.t("msg_export_success", file_path))
             return True
         except Exception as e:
-            messagebox.showerror("Ошибка экспорта", f"Ошибка записи файла: {e}")
+            messagebox.showerror(self.t("msg_export_err_title"),
+                                 self.t("msg_export_write_err", e))
             return False
 
+    def open_paste_dialog(self):
+        self.commit_floating()
+        try:
+            content = export(self.layers)
+        except Exception as e:
+            messagebox.showerror(
+                self.t("msg_export_err_title"),
+                self.t("msg_export_prep_err", e))
+            return
+        template_text = content if content and content.strip() else None
+        PasteDialog(self.root, template_text=template_text, lang=self.lang)
+
     def save_dictionary_file(self):
-        file_path = filedialog.asksaveasfilename()
+        file_path = filedialog.asksaveasfilename(
+            title=self.t("save_dialog_title"))
         if not file_path:
             return False
         file_path = os.path.splitext(file_path)[0]
@@ -625,17 +603,18 @@ class GridApp:
         try:
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=4)
-            print(export_path)
             self.export_data(export_path)
             self.is_dirty = False
             self.update_title()
             return True
         except Exception as e:
-            messagebox.showerror("Ошибка сохранения", f"Не удалось сохранить: {e}")
+            messagebox.showerror(self.t("msg_save_err_title"),
+                                 self.t("msg_save_err", e))
             return False
 
     def load_dictionary_file(self):
         file_path = filedialog.askopenfilename(
+            title=self.t("open_dialog_title"),
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
         if not file_path:
             return
@@ -671,12 +650,13 @@ class GridApp:
             self.is_dirty = False
             self.update_title()
         except Exception as e:
-            messagebox.showerror("Ошибка загрузки", f"Не удалось загрузить: {e}")
+            messagebox.showerror(self.t("msg_load_err_title"),
+                                 self.t("msg_load_err", e))
 
     def on_closing(self):
         if self.is_dirty:
             response = messagebox.askyesnocancel(
-                "Сохранение", "У вас есть несохраненные изменения. Сохранить перед выходом?")
+                self.t("msg_exit_title"), self.t("msg_exit_text"))
             if response is True and self.save_dictionary_file():
                 self.root.destroy()
             elif response is False:
@@ -730,14 +710,11 @@ class GridApp:
         self.request_redraw()
 
     def undo(self, event=None):
-        # Сначала разбираемся с активным floating.
         if self.floating_data is not None or self.floating_lines is not None:
             if not self._floating_state_saved:
-                # Новая плавающая операция (например, вставка) — просто отменяем.
                 self._clear_selection_and_floating()
                 self.request_redraw()
                 return
-            # Иначе — операция move/cut; снапшот уже сохранён.
         if not self.undo_stack:
             return
         current_state = {
@@ -775,7 +752,11 @@ class GridApp:
     def add_layer(self):
         self.commit_floating()
         self.save_state()
-        self.layers.append(self._create_new_layer(f"Слой {len(self.layers) + 1}"))
+        new_layer = self._create_new_layer(f"Слой {len(self.layers) + 1}")
+        # FIX: если включён solo — новый слой скрыт, чтобы не ломать изоляцию
+        if self.soloed_layer is not None:
+            new_layer["visible"] = False
+        self.layers.append(new_layer)
         self.active_layer_idx = len(self.layers) - 1
         self.update_right_toolbar()
         self.request_redraw()
@@ -788,22 +769,33 @@ class GridApp:
 
     def remove_layer(self, idx):
         if len(self.layers) <= 1:
-            messagebox.showwarning("Удаление слоя", "Нельзя удалить единственный слой.")
+            messagebox.showwarning(self.t("msg_del_layer_title"),
+                                   self.t("msg_last_layer_text"))
             return
         if not (0 <= idx < len(self.layers)):
             return
         layer_name = self.layers[idx]["name"]
-        if not messagebox.askyesno("Удаление слоя", f"Удалить слой '{layer_name}'?"):
+        if not messagebox.askyesno(self.t("msg_del_layer_title"),
+                                   self.t("msg_del_layer_text", layer_name)):
             return
 
         self.commit_floating()
         self.save_state()
         del self.layers[idx]
 
+        # FIX: корректно обновляем active и soloed
         if self.active_layer_idx == idx:
             self.active_layer_idx = min(idx, len(self.layers) - 1)
         elif self.active_layer_idx > idx:
             self.active_layer_idx -= 1
+
+        if self.soloed_layer is not None:
+            if self.soloed_layer == idx:
+                self.soloed_layer = None
+                for layer in self.layers:
+                    layer["visible"] = True
+            elif self.soloed_layer > idx:
+                self.soloed_layer -= 1
 
         self.update_right_toolbar()
         self.request_redraw()
@@ -831,17 +823,22 @@ class GridApp:
             self.commit_floating()
             self.save_state()
             self.layers[idx], self.layers[new_idx] = self.layers[new_idx], self.layers[idx]
+            # FIX: корректно переносим active и soloed
             if self.active_layer_idx == idx:
                 self.active_layer_idx = new_idx
             elif self.active_layer_idx == new_idx:
                 self.active_layer_idx = idx
+            if self.soloed_layer == idx:
+                self.soloed_layer = new_idx
+            elif self.soloed_layer == new_idx:
+                self.soloed_layer = idx
             self.update_right_toolbar()
             self.request_redraw()
 
     def rename_layer(self, idx):
         from tkinter import simpledialog
         new_name = simpledialog.askstring(
-            "Переименование слоя", "Новое имя слоя:",
+            self.t("rename_title"), self.t("rename_prompt"),
             initialvalue=self.layers[idx]["name"], parent=self.root)
         if new_name and new_name != self.layers[idx]["name"]:
             self.save_state()
@@ -866,45 +863,46 @@ class GridApp:
         self.request_redraw()
 
     # ============================================================
-    #  Правый тулбар
+    #  Правая панель
     # ============================================================
 
     def validate_digit(self, value):
         return value == "" or value.isdigit()
 
-    def get_contrast_color(self, hex_color):
-        hex_color = hex_color.lstrip('#')
-        if len(hex_color) != 6:
-            return "black"
-        try:
-            r = int(hex_color[0:2], 16)
-            g = int(hex_color[2:4], 16)
-            b = int(hex_color[4:6], 16)
-            luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-            return "white" if luminance < 0.5 else "black"
-        except Exception:
-            return "black"
-
     def update_prop_value(self, prop_name, var):
         self.tool_prop_values[self.current_value][prop_name] = var.get()
 
-    def update_right_toolbar(self):
-        if not self.right_toolbar.winfo_ismapped():
-            self.right_toolbar.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
+    def _ensure_right_toolbar_visible(self):
+        # FIX: один раз создаём контейнеры, дальше пересобираем их содержимое
+        if hasattr(self, "layers_container"):
+            return
+        self.layers_container = tk.Frame(self.right_toolbar)
+        self.layers_container.pack(fill=tk.X)
+        self.props_container = tk.Frame(self.right_toolbar)
+        self.props_container.pack(fill=tk.BOTH, expand=True)
+        self.right_toolbar.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
 
-        for widget in self.right_toolbar.winfo_children():
+    def update_right_toolbar(self):
+        self._ensure_right_toolbar_visible()
+        self._rebuild_layers_panel()
+        self._rebuild_props_panel()
+
+    def _rebuild_layers_panel(self):
+        for widget in self.layers_container.winfo_children():
             widget.destroy()
 
-        # --- Слои ---
-        layers_header = tk.Frame(self.right_toolbar)
+        layers_header = tk.Frame(self.layers_container)
         layers_header.pack(fill=tk.X, padx=5, pady=(5, 2))
-        tk.Label(layers_header, text="Слои", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
-        tk.Button(layers_header, text="+ Слой", font=("Arial", 8),
+        tk.Label(layers_header, text=self.t("toolbar_layers"),
+                 font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        tk.Button(layers_header, text=self.t("toolbar_add_layer"),
+                  font=("Arial", 8),
                   command=self.add_layer).pack(side=tk.RIGHT)
 
-        tk.Frame(self.right_toolbar, height=1, bg="gray").pack(fill=tk.X, padx=5, pady=2)
+        tk.Frame(self.layers_container, height=1, bg="gray").pack(
+            fill=tk.X, padx=5, pady=2)
 
-        layers_frame = tk.Frame(self.right_toolbar)
+        layers_frame = tk.Frame(self.layers_container)
         layers_frame.pack(fill=tk.X, padx=5, pady=2)
 
         for idx in range(len(self.layers) - 1, -1, -1):
@@ -921,7 +919,8 @@ class GridApp:
                 width=2, relief=tk.FLAT, bg=bg_color,
                 command=lambda i=idx: self.toggle_layer_visibility(i))
             vis_btn.grid(row=0, column=0, sticky="w")
-            vis_btn.bind("<Button-3>", lambda e, i=idx: self.solo_layer_visibility(i))
+            vis_btn.bind("<Button-3>",
+                         lambda e, i=idx: self.solo_layer_visibility(i))
 
             name_btn = tk.Button(
                 row, text=layer["name"], anchor="w", relief=tk.FLAT,
@@ -929,7 +928,8 @@ class GridApp:
                 bg=bg_color,
                 command=lambda i=idx: self.set_active_layer(i))
             name_btn.grid(row=0, column=1, sticky="ew")
-            name_btn.bind("<Double-Button-1>", lambda e, i=idx: self.rename_layer(i))
+            name_btn.bind("<Double-Button-1>",
+                          lambda e, i=idx: self.rename_layer(i))
 
             tk.Button(row, text="▲", width=1, relief=tk.FLAT, bg=bg_color,
                       command=lambda i=idx: self.move_layer(i, 1)
@@ -939,32 +939,50 @@ class GridApp:
                       ).grid(row=0, column=3, sticky="e")
 
             if len(self.layers) > 1:
-                tk.Button(row, text="X", width=2, fg="red", relief=tk.FLAT, bg=bg_color,
+                tk.Button(row, text="X", width=2, fg="red", relief=tk.FLAT,
+                          bg=bg_color,
                           command=lambda i=idx: self.remove_layer(i)
                           ).grid(row=0, column=4, sticky="e")
 
-        # --- Свойства инструмента ---
+    def _rebuild_props_panel(self):
+        for widget in self.props_container.winfo_children():
+            widget.destroy()
+
+        # FIX: снимаем старые trace-колбэки, чтобы не текли StringVar'ы
+        for var, trace_id in self._prop_traces:
+            try:
+                var.trace_remove("write", trace_id)
+            except Exception:
+                pass
+        self._prop_traces.clear()
+
         if not self.current_props_list:
             return
-        tk.Frame(self.right_toolbar, height=2, bg="gray").pack(fill=tk.X, padx=5, pady=10)
-        tk.Label(self.right_toolbar, text=f"Свойства: {self.current_value}",
-                 font=("Arial", 10, "bold")).pack(anchor="w", padx=5, pady=2)
 
-        props_frame = tk.Frame(self.right_toolbar)
+        tk.Label(self.props_container,
+                 text=self.t("toolbar_props", self.current_value),
+                 font=("Arial", 10, "bold")).pack(anchor="w", padx=5, pady=2)
+        tk.Frame(self.props_container, height=2, bg="gray").pack(
+            fill=tk.X, padx=5, pady=10)
+
+        props_frame = tk.Frame(self.props_container)
         props_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         vcmd = (self.root.register(self.validate_digit), '%P')
 
         for prop in self.current_props_list:
             row_frame = tk.Frame(props_frame)
             row_frame.pack(fill=tk.X, pady=3)
-            tk.Label(row_frame, text=f"{prop}:", width=12, anchor="w").pack(side=tk.LEFT)
+            tk.Label(row_frame, text=f"{prop}:", width=12, anchor="w"
+                     ).pack(side=tk.LEFT)
 
             if prop not in self.tool_prop_values[self.current_value]:
                 self.tool_prop_values[self.current_value][prop] = "0"
 
             var = tk.StringVar(value=self.tool_prop_values[self.current_value][prop])
-            var.trace_add("write",
-                          lambda *a, p=prop, v=var: self.update_prop_value(p, v))
+            trace_id = var.trace_add(
+                "write",
+                lambda *a, p=prop, v=var: self.update_prop_value(p, v))
+            self._prop_traces.append((var, trace_id))
             tk.Entry(row_frame, width=8, textvariable=var,
                      validate='key', validatecommand=vcmd).pack(side=tk.RIGHT)
 
@@ -976,14 +994,28 @@ class GridApp:
         self.is_dirty = True
         self.update_title()
 
+    def t(self, key, *args):
+        return translate(self.lang, key, *args)
+
+    def set_language(self, lang):
+        if lang not in TRANSLATIONS or lang == self.lang:
+            return
+        self.lang = lang
+        self.lang_var.set(lang)
+        self.create_menu()
+        self.toolbar_title.config(text=self.t("toolbar_tools"))
+        self.update_right_toolbar()
+        self.update_title()
+        self._update_status()
+
     def update_title(self):
-        base = "Бесконечная сетка с инструментами и экспортом"
+        base = self.t("app_title")
         self.root.title(base + (" *" if self.is_dirty else ""))
 
     def _update_status(self):
         scale_pct = round(self.cell_size / self.default_cell_size * 100)
         self.status_bar.config(
-            text=f"Координаты: ({self.mouse_col}, {self.mouse_row}) | Масштаб: {scale_pct}%")
+            text=self.t("status_bar", self.mouse_col, self.mouse_row, scale_pct))
 
     def global_click_handler(self, event):
         if not isinstance(event.widget, tk.Entry):
@@ -1072,18 +1104,21 @@ class GridApp:
         x1 = c * self.cell_size - self.cam_x
         y1 = r * self.cell_size - self.cam_y
         tool_name = item["tool"]
-        size = item["props"].get("SIZE")
+        # FIX: безопасный разбор SIZE (пустая строка больше не роняет int())
+        size = safe_int(item["props"].get("SIZE"), 0) \
+            if item["props"].get("SIZE") else 0
+        prop_color = item["props"].get("COLOR", '0')
         draw_size = self.cell_size
-        if size is not None and tool_name not in ("POLY",):
-            draw_size *= (int(size) + 1)
-        color = self._get_color(tool_name)
+        if size > 0 and tool_name not in ("POLY",):
+            draw_size *= (size + 1)
+        color = self._get_color(tool_name, prop_color=prop_color)
         self.canvas.create_rectangle(
             x1, y1, x1 + draw_size, y1 + draw_size,
             fill=color, outline=outline)
         if draw_text:
             self.canvas.create_text(
                 x1 + draw_size / 2, y1 + draw_size / 2,
-                text=tool_name, fill=self.get_contrast_color(color),
+                text=tool_name, fill=get_contrast_color(color),
                 font=("Arial", font_size, "bold"))
 
     def _draw_line(self, x1, y1, x2, y2, item, draw_text, font_size):
@@ -1145,7 +1180,8 @@ class GridApp:
 
             if draw_lines:
                 lines = layer.get("lines", {})
-                src = (lines.lines_in_view(start_col, end_col - 1, start_row, end_row - 1)
+                src = (lines.lines_in_view(start_col, end_col - 1,
+                                           start_row, end_row - 1)
                        if isinstance(lines, ChunkedLayerLines) else lines.items())
                 for (start_loc, end_loc), item in src:
                     c1, r1 = start_loc
@@ -1156,7 +1192,6 @@ class GridApp:
                     y2 = r2 * self.cell_size - self.cam_y + self.cell_size / 2
                     self._draw_line(x1, y1, x2, y2, item, False, 0)
 
-        # Маркер (0, 0)
         if start_col <= 0 < end_col and start_row <= 0 < end_row:
             ox1 = -self.cam_x
             oy1 = -self.cam_y
@@ -1169,7 +1204,6 @@ class GridApp:
                     ox1 + 5, oy1 + 5, text="(0,0)", anchor="nw",
                     fill="#e74c3c", font=("Arial", 8, "bold"))
 
-        # Плавающие клетки
         if self.floating_data:
             for (rel_c, rel_r), item in self.floating_data.items():
                 abs_c = self.floating_offset[0] + rel_c
@@ -1180,7 +1214,6 @@ class GridApp:
                         abs_c, abs_r, item, draw_text,
                         max(8, int(self.cell_size / 5)), outline_color)
 
-        # Плавающие линии
         if self.floating_lines:
             for (rel_start, rel_end), item in self.floating_lines.items():
                 c1 = self.floating_offset[0] + rel_start[0]
@@ -1209,7 +1242,7 @@ class GridApp:
 
         self.canvas = tk.Canvas(
             self.canvas_frame, width=self.view_width,
-            height=self.view_height, bg="white")
+            height=self.view_height, bg='#cccccc')
         self.canvas.pack(padx=5, pady=5, fill=tk.BOTH, expand=True)
 
         self.canvas.bind("<Button-1>", self.on_left_click)
@@ -1231,9 +1264,14 @@ class GridApp:
         self.canvas.bind("<Button-5>",
                          lambda e: self.zoom_at(e.x, e.y, 1 / self.zoom_speed))
 
+        # FIX: Ctrl + ЛКМ — прямоугольное выделение (раньше не работало)
         self.canvas.bind("<Shift-Button-1>", self.start_selection)
         self.canvas.bind("<Shift-B1-Motion>", self.update_selection)
         self.canvas.bind("<Shift-ButtonRelease-1>", self.end_selection)
+        self.canvas.bind("<Control-Button-1>", self.start_selection)
+        self.canvas.bind("<Control-B1-Motion>", self.update_selection)
+        self.canvas.bind("<Control-ButtonRelease-1>", self.end_selection)
+
         self.canvas.bind("<Configure>", self._on_canvas_resize)
 
         self.request_redraw()
@@ -1249,25 +1287,40 @@ class GridApp:
     # ============================================================
 
     def bind_hotkeys(self):
-        for seq, cb in [
-            ("<Control-c>", self.copy_selection), ("<Control-C>", self.copy_selection),
-            ("<Control-x>", self.cut_selection),  ("<Control-X>", self.cut_selection),
-            ("<Control-v>", self.paste_selection),("<Control-V>", self.paste_selection),
-            ("<Delete>", self.delete_selection),  ("<BackSpace>", self.delete_selection),
-            ("<Control-z>", self.undo),           ("<Control-Z>", self.undo),
-            ("<Control-Shift-z>", self.redo),     ("<Control-Shift-Z>", self.redo),
-            ("<Control-y>", self.redo),           ("<Control-Y>", self.redo),
+        # FIX: хоткеи не должны срабатывать, когда фокус в Entry
+        def _guard(cb):
+            def handler(event=None):
+                if isinstance(self.root.focus_get(), tk.Entry):
+                    return None
+                return cb(event)
+            return handler
+
+        bindings = [
+            ("<Control-c>", self.copy_selection),
+            ("<Control-C>", self.copy_selection),
+            ("<Control-x>", self.cut_selection),
+            ("<Control-X>", self.cut_selection),
+            ("<Control-v>", self.paste_selection),
+            ("<Control-V>", self.paste_selection),
+            ("<Delete>", self.delete_selection),
+            ("<BackSpace>", self.delete_selection),
+            ("<Control-z>", self.undo),
+            ("<Control-Z>", self.undo),
+            ("<Control-Shift-z>", self.redo),
+            ("<Control-Shift-Z>", self.redo),
+            ("<Control-y>", self.redo),
+            ("<Control-Y>", self.redo),
             ("<Control-s>", lambda e: self.save_dictionary_file()),
             ("<Control-S>", lambda e: self.save_dictionary_file()),
             ("<Control-o>", lambda e: self.load_dictionary_file()),
             ("<Control-O>", lambda e: self.load_dictionary_file()),
-            ("<Control-e>", lambda e: self.export_data()),
-            ("<Control-E>", lambda e: self.export_data()),
             ("<Control-n>", lambda e: self.new_schematic()),
             ("<Control-N>", lambda e: self.new_schematic()),
             ("<Escape>", self.cancel_action),
-            ("<Control-a>", self.select_all),     ("<Control-A>", self.select_all),
-            ("<Control-d>", self.deselect_all),   ("<Control-D>", self.deselect_all),
+            ("<Control-a>", self.select_all),
+            ("<Control-A>", self.select_all),
+            ("<Control-d>", self.deselect_all),
+            ("<Control-D>", self.deselect_all),
             ("<F1>", self.show_help),
             ("<Home>", lambda e: self.reset_camera()),
             ("<Control-0>", lambda e: self.reset_camera()),
@@ -1279,8 +1332,11 @@ class GridApp:
             ("<Control-ISO_Left_Tab>", self.prev_layer),
             ("<KeyPress-space>", self._space_pan_press),
             ("<KeyRelease-space>", self._space_pan_release),
-        ]:
-            self.root.bind(seq, cb)
+            ("<Control-Shift-E>", lambda e: self.open_paste_dialog()),
+            ("<Control-Shift-e>", lambda e: self.open_paste_dialog()),
+        ]
+        for seq, cb in bindings:
+            self.root.bind(seq, _guard(cb))
 
         self.root.bind("<KeyPress>", self.on_key_press)
         self.root.bind("<KeyRelease>", self.on_key_release)
@@ -1343,18 +1399,24 @@ class GridApp:
             self.request_redraw()
 
     def is_click_on_selection(self, col, row):
+        # FIX: учитываем и floating_lines, а не только floating_data
         if self.floating_data:
             rel_c = col - self.floating_offset[0]
             rel_r = row - self.floating_offset[1]
             if (rel_c, rel_r) in self.floating_data:
                 return True
+        if self.floating_lines:
+            rel_c = col - self.floating_offset[0]
+            rel_r = row - self.floating_offset[1]
+            for (c1, r1), (c2, r2) in self.floating_lines:
+                if (c1, r1) == (rel_c, rel_r) or (c2, r2) == (rel_c, rel_r):
+                    return True
         if self.selection:
             min_c, min_r, max_c, max_r = self.selection
             return min_c <= col <= max_c and min_r <= row <= max_r
         return False
 
     def on_left_click(self, event):
-        # --- space-pan ---
         if self.space_pan_active:
             self.pan_start_x = event.x
             self.pan_start_y = event.y
@@ -1362,13 +1424,12 @@ class GridApp:
             self.pan_cam_start_y = self.cam_y
             self._space_panning = True
             return
-        # Shift+ЛКМ / Ctrl+ЛКМ — это старт выделения (обрабатывается отдельными bind'ами).
+        # Shift/Ctrl обрабатываются отдельными bind'ами (start_selection)
         if (event.state & 0x0001) or (event.state & 0x0004):
             return
 
         col, row = self._event_to_cell(event)
 
-        # --- click on active floating: продолжить перетаскивание ---
         if self.floating_data is not None or self.floating_lines is not None:
             if self.is_click_on_selection(col, row):
                 self.is_moving_selection = True
@@ -1378,7 +1439,6 @@ class GridApp:
             self.commit_floating()
             return
 
-        # --- click on regular selection: поднять в floating ---
         if self.selection and self.is_click_on_selection(col, row):
             min_c, min_r, max_c, max_r = self.selection
             has_elements, has_lines = self._has_content_in_selection(
@@ -1393,13 +1453,12 @@ class GridApp:
                 self.request_redraw()
             return
 
-        # --- обычная кисть / старт линии ---
         self.commit_floating()
+        self._stroke_saved = False
         if self.is_line_tool(self.current_value):
             self.line_start = (col, row)
         else:
-            self.save_state()
-            self.paint(event)
+            self._apply_paint(event)
 
     def on_left_drag(self, event):
         if self._space_panning:
@@ -1409,7 +1468,6 @@ class GridApp:
             self.cam_y = self.pan_cam_start_y - dy
             self.request_redraw()
             return
-        # Shift/Ctrl/Alt обрабатываются отдельными bind'ами.
         if (event.state & 0x0001) or (event.state & 0x0004) or (event.state & 0x0008):
             return
 
@@ -1435,7 +1493,7 @@ class GridApp:
         if self.is_moving_selection:
             self.during_move(event)
         else:
-            self.paint(event)
+            self._apply_paint(event)
 
     def on_left_release(self, event):
         if self._space_panning:
@@ -1457,13 +1515,15 @@ class GridApp:
 
         self.is_moving_selection = False
         self.move_start_mouse = None
+        self._stroke_saved = False
 
     def on_right_click(self, event):
         col, row = self._event_to_cell(event)
         loc = (col, row)
 
+        # FIX: O(1) поиск линий через чанк вместо O(n)
+        has_lines = next(self._lines_touching_cell(loc), None) is not None
         has_content = loc in self.grid_data
-        has_lines = any(loc == k[0] or loc == k[1] for k in self.grid_lines)
         has_floating = False
         if self.floating_data:
             rel_c = col - self.floating_offset[0]
@@ -1483,9 +1543,8 @@ class GridApp:
             del self.grid_data[loc]
             modified = True
 
-        lines_to_delete = [k for k in self.grid_lines
-                           if k[0] == loc or k[1] == loc]
-        for k in lines_to_delete:
+        # FIX: используем чанк-поиск
+        for k in list(self._lines_touching_cell(loc)):
             del self.grid_lines[k]
             modified = True
 
@@ -1500,13 +1559,17 @@ class GridApp:
             self.mark_dirty()
             self.request_redraw()
 
-    def paint(self, event):
+    def _apply_paint(self, event):
+        """Ставит клетку. Первое изменение за штрих сохраняет снапшот."""
         col, row = self._event_to_cell(event)
         loc = (col, row)
         props_snapshot = {p: self.tool_prop_values[self.current_value].get(p, "0")
                           for p in self.current_props_list}
         new_item = {"tool": self.current_value, "props": props_snapshot}
         if self.grid_data.get(loc) != new_item:
+            if not self._stroke_saved:
+                self.save_state()
+                self._stroke_saved = True
             self.grid_data[loc] = new_item
             self.mark_dirty()
             self.request_redraw()
@@ -1527,10 +1590,9 @@ class GridApp:
         dy = event.y - self.pan_start_y
         self.cam_x = self.pan_cam_start_x - dx
         self.cam_y = self.pan_cam_start_y - dy
-        self.mouse_col = int((event.x + self.cam_x) // self.cell_size)
-        self.mouse_row = int((event.y + self.cam_y) // self.cell_size)
-        self.status_bar.config(
-            text=f"Координаты: ({self.mouse_col}, {self.mouse_row})")
+        self.mouse_col, self.mouse_row = self._event_to_cell(event)
+        # FIX: убран хардкод русского текста — используется локализация
+        self._update_status()
         self.request_redraw()
 
     def end_pan(self, event):
@@ -1558,22 +1620,30 @@ class GridApp:
         self.request_redraw()
 
     def commit_floating(self):
-        has_changed = False
+        # FIX: пустые буферы не создают пустой undo-шаг и не метят dirty
+        has_data = bool(self.floating_data)
+        has_lines = bool(self.floating_lines)
 
-        if self.floating_data is not None:
-            if not self._floating_state_saved:
-                self.save_state()
+        if not has_data and not has_lines:
+            if self.floating_data is not None or self.floating_lines is not None:
+                self.floating_data = None
+                self.floating_lines = None
+                self._floating_state_saved = False
+                self._clear_selection_and_floating()
+                self.request_redraw()
+            return
+
+        if not self._floating_state_saved:
+            self.save_state()
+
+        if has_data:
             for (rel_c, rel_r), item in self.floating_data.items():
                 abs_c = self.floating_offset[0] + rel_c
                 abs_r = self.floating_offset[1] + rel_r
                 self.grid_data[(abs_c, abs_r)] = {
                     "tool": item["tool"], "props": item["props"].copy()}
-            self.floating_data = None
-            has_changed = True
 
-        if self.floating_lines is not None:
-            if not has_changed and not self._floating_state_saved:
-                self.save_state()
+        if has_lines:
             for (rel_start, rel_end), item in self.floating_lines.items():
                 abs_start = (self.floating_offset[0] + rel_start[0],
                              self.floating_offset[1] + rel_start[1])
@@ -1581,14 +1651,10 @@ class GridApp:
                            self.floating_offset[1] + rel_end[1])
                 self.grid_lines[(abs_start, abs_end)] = {
                     "tool": item["tool"], "props": item["props"].copy()}
-            self.floating_lines = None
-            has_changed = True
 
-        if has_changed:
-            self._floating_state_saved = False
-            self.mark_dirty()
-            self._clear_selection_and_floating()
-
+        self._floating_state_saved = False
+        self.mark_dirty()
+        self._clear_selection_and_floating()
         self.request_redraw()
 
     # ============================================================
@@ -1738,7 +1804,10 @@ class GridApp:
             self.request_redraw()
 
     def paste_selection(self, event=None):
+        # FIX: не вставляем пустой буфер
         if not self.clipboard:
+            return
+        if not self.clipboard.get("cells") and not self.clipboard.get("lines"):
             return
         self.commit_floating()
         self.floating_data = {k: {"tool": v["tool"], "props": v["props"].copy()}
@@ -1774,105 +1843,16 @@ class GridApp:
     # ============================================================
 
     def show_help(self, event=None):
-        help_text = (
-            "ГОРЯЧИЕ КЛАВИШИ\n"
-            "─────────────────────────────\n"
-            "ФАЙЛ\n"
-            "  Ctrl+N            — Новая схематика\n"
-            "  Ctrl+O            — Открыть\n"
-            "  Ctrl+S            — Сохранить\n"
-            "  Ctrl+E            — Экспорт\n\n"
-            "ПРАВКА\n"
-            "  Ctrl+Z            — Отменить\n"
-            "  Ctrl+Y / Ctrl+Shift+Z — Повторить\n"
-            "  Ctrl+C / Ctrl+X / Ctrl+V — Копировать / Вырезать / Вставить\n"
-            "  Ctrl+A            — Выделить всё\n"
-            "  Ctrl+D / Esc      — Снять выделение\n"
-            "  Delete / Backspace — Удалить выделенное\n\n"
-            "КАМЕРА\n"
-            "  Колёсико мыши     — Зум (в точку курсора)\n"
-            "  + / -             — Зум\n"
-            "  СКМ + drag        — Панорамирование\n"
-            "  Пробел + drag     — Панорамирование\n"
-            "  WASD              — Движение камеры\n"
-            "  Home / Ctrl+0     — Сброс камеры\n\n"
-            "ИНСТРУМЕНТЫ\n"
-            "  ЛКМ               — Рисовать\n"
-            "  ПКМ               — Стереть\n"
-            "  Shift+ЛКМ (drag)  — Прямоугольное выделение\n"
-            "  Ctrl+ЛКМ (drag)   — Прямоугольное выделение\n"
-            "  Alt+ЛКМ / I       — Пипетка (взять инструмент с клетки)\n"
-            "  Клик по выделению — Перетащить\n"
-            "  Esc               — Отменить линию / перенос / выделение\n\n"
-            "СЛОИ\n"
-            "  [ / ]             — Предыдущий / Следующий слой\n"
-            "  Ctrl+Tab / Ctrl+Shift+Tab — То же\n"
-            "  Двойной клик по имени — Переименовать слой\n"
-            "  Меню «Слои»       — Добавить / Удалить\n\n"
-            "  F1                — Эта справка"
-        )
         win = tk.Toplevel(self.root)
-        win.title("Справка — горячие клавиши")
+        win.title(self.t("help_title"))
         win.transient(self.root)
         txt = tk.Text(win, wrap=tk.WORD, width=72, height=32,
                       font=("Courier New", 9), padx=10, pady=10)
         txt.pack(fill=tk.BOTH, expand=True)
-        txt.insert("1.0", help_text)
+        txt.insert("1.0", self.t("help_text"))
         txt.config(state=tk.DISABLED)
-        tk.Button(win, text="Закрыть", command=win.destroy).pack(pady=6)
-
-
-# ============================================================
-#  Экспорт
-# ============================================================
-
-def get_wall_end_pos(x, y, size):
-    return x + size, y + size
-
-
-def export(exported_layers):
-    ret = []
-    for idx, layer in enumerate(exported_layers):
-        ret.append(f":layer {idx}")
-        lines = layer['lines']
-        for pos, data in layer['data'].items():
-            tool = data['tool']
-            props = data['props']
-            group = EDITOR_TOOL_TO_GROUP[tool]
-            color = props.get("COLOR", 'None')
-            print(color)
-            if group == "WALLS":
-                toolid = EDITOR_TOOL_TO_ID[tool]
-                change = props.get("CHANGE TYPE", '0')
-                if change == '0':
-                    place = 1
-                elif change == '1':
-                    place = 0
-                elif change == '2':
-                    toolid = 'None'
-                size = props.get("SIZE", '0')
-                x2, y2 = 'None', 'None'
-                if size != '0':
-                    x2, y2 = get_wall_end_pos(pos[0], pos[1], int(size))
-                if color != 'None':
-                    color = int(color) - 1
-                ret.append(f'tcwall place {place} x1 {pos[0]} y1 {pos[1]} x2 {x2} type {toolid} color {color}')
-            elif group == "OTHER":
-                if tool == "POLY":
-                    if props.get("CHANGE TYPE", '0') == '0':
-                        ret.append(f"polygon {pos[0]} {pos[1]} "
-                                   f"{props['CLASS']} {props['SIZE']} {props['TIER']}")
-                    else:
-                        ret.append(f"polygon_type {pos[0]} {pos[1]} "
-                                   f"{props['CLASS']} {props['SIZE']} {props['TIER']}")
-            if props.get("TEAM") == '1':
-                ret.append("team")
-
-        for poses, data in lines.items():
-            tool = data['tool']
-            ret.append(f"joint {poses[0][0]} {poses[0][1]} "
-                       f"{poses[1][0]} {poses[1][1]} {EDITOR_TOOL_TO_ID[tool]}")
-    return '\n'.join(ret)
+        tk.Button(win, text=self.t("help_close"),
+                  command=win.destroy).pack(pady=6)
 
 
 # ============================================================
@@ -1883,7 +1863,6 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.geometry("1200x700")
 
-    # Глубокая копия: не модифицируем импортированный EDITOR_TOOLS.
     my_custom_tools = copy.deepcopy(EDITOR_TOOLS)
 
     for group, tools in my_custom_tools.items():
@@ -1898,8 +1877,7 @@ if __name__ == "__main__":
                         props[0].append(extra)
             if group == "WALLS" and "SIZE" not in props[0]:
                 props[0].append("SIZE")
-            r, g, b, a = col
-            tools[name] = [f"#{b:02x}{g:02x}{r:02x}", *props]
+            tools[name] = [rgba_list_to_hex(col), *props]
 
     app = GridApp(root, tools=my_custom_tools)
 
