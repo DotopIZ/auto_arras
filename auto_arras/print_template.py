@@ -29,10 +29,62 @@ def get_micro_instructions(instruction) -> list[str]:
     com = instruction
     tokens = instruction.split()
     command = tokens[0]
+    print(instruction)
 
     i = tokens[1:]
     arg_len = len(i)
+    if arg_len % 2 == 0:
+        btr_tkns = dict(zip(i[::2], i[1::2]))
+        res = []
+        match command:
+            case 'tcwall':
+                x1, y1 = btr_tkns.get('x1', 'None'), btr_tkns.get('y1', 'None')
+                if x1 != 'None' and y1 != 'None':
+                    x1, y1 = int(x1), int(y1)
+                    res.extend(
+                        [
+                            f'm {x1} {y1}',
+                        ]
+                    )
+                place = btr_tkns.get('place')
+                if place == '1':
+                    res.append('p x')
+                wtype = btr_tkns.get('type', 'None')
+                if wtype != 'None':
+                    wtype = int(wtype)
+                    res.extend(
+                        [
+                            'p z',
+                            f'tm {wtype}',
+                            'r z',
+                        ]
+                    )
+                color = btr_tkns.get('color', 'None')
+                if color != 'None':
+                    color = int(color)
+                    if color == -1:
+                        res.append('lt c')
+                    else:
+                        res.extend(
+                            [
+                                'p c',
+                                f'cm {color}',
+                                'r c',
+                            ]
+                        )
+                x2, y2 = btr_tkns.get('x2', 'None'), btr_tkns.get('y2', 'None')
+                if x2 != 'None' and y2 != 'None':
+                    res.append(f'lm {x2} {y2}')
+                elif color != 'None' or wtype != 'None':
+                    res.append(f'm {x1} {y1}')
+                if place == '1':
+                    res.append('r x')
+        print(btr_tkns)
+        print(res)
+        if res:
+            return res
     i.extend([0] * (5 - arg_len))
+    
     try:
         MICRO_INSTRUCTIONS_TABLE = {
             'wall': {
@@ -93,7 +145,6 @@ def get_micro_instructions(instruction) -> list[str]:
                     f'm {i[0]} {i[1]}',
                     'p x',
                     'lt c',
-                    's',
                     f'lm {i[2]} {i[3]}',
                     'r x',
                 ),

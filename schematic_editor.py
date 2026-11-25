@@ -3,6 +3,7 @@ from tkinter import filedialog, messagebox
 import json
 import time
 import copy
+import os
 
 from auto_arras.config import (
     EDITOR_TOOLS, EDITOR_TOOL_TO_ID, EDITOR_TOOL_TO_GROUP, MAX_WALL_SIZE,
@@ -514,8 +515,6 @@ class GridApp:
         file_menu.add_command(label="Новый", command=self.new_schematic, accelerator="Ctrl+N")
         file_menu.add_command(label="Открыть", command=self.load_dictionary_file, accelerator="Ctrl+O")
         file_menu.add_command(label="Сохранить", command=self.save_dictionary_file, accelerator="Ctrl+S")
-        file_menu.add_separator()
-        file_menu.add_command(label="Экспорт", command=self.export_data, accelerator="Ctrl+E")
         menubar.add_cascade(label="Файл", menu=file_menu)
 
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -584,16 +583,13 @@ class GridApp:
         self._update_status()
         self.request_redraw()
 
-    def export_data(self):
+    def export_data(self, file_path):
         try:
             processed_data = export(self.layers)
         except Exception as e:
             messagebox.showerror("Ошибка экспорта", f"Не удалось подготовить данные: {e}")
             return False
 
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Текстовые файлы", "*.txt"), ("Все файлы", "*.*")])
         if not file_path:
             return False
         try:
@@ -609,11 +605,12 @@ class GridApp:
             return False
 
     def save_dictionary_file(self):
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+        file_path = filedialog.asksaveasfilename()
         if not file_path:
             return False
+        file_path = os.path.splitext(file_path)[0]
+        json_path = file_path + '.json'
+        export_path = file_path + '.txt'
         payload = {
             "layers": [
                 {
@@ -626,8 +623,10 @@ class GridApp:
             ]
         }
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
+            with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=4)
+            print(export_path)
+            self.export_data(export_path)
             self.is_dirty = False
             self.update_title()
             return True
@@ -1833,31 +1832,31 @@ def get_wall_end_pos(x, y, size):
 
 def export(exported_layers):
     ret = []
-    for layer in exported_layers:
+    for idx, layer in enumerate(exported_layers):
+        ret.append(f":layer {idx}")
         lines = layer['lines']
         for pos, data in layer['data'].items():
             tool = data['tool']
             props = data['props']
             group = EDITOR_TOOL_TO_GROUP[tool]
+            color = props.get("COLOR", 'None')
+            print(color)
             if group == "WALLS":
-                if tool == "PRWALL":
-                    ret.append(f"wall {pos[0]} {pos[1]}")
-                else:
-                    change = props.get("CHANGE TYPE", '0')
-                    if change == '1':
-                        ret.append(f"wall_type {pos[0]} {pos[1]} "
-                                   f"{EDITOR_TOOL_TO_ID[tool]}")
-                    elif change == '2':
-                        ret.append(f"wall {pos[0]} {pos[1]}")
-                    else:
-                        size = props.get("SIZE", '0')
-                        if size == '0':
-                            ret.append(f"type_wall {pos[0]} {pos[1]} "
-                                       f"{EDITOR_TOOL_TO_ID[tool]}")
-                        else:
-                            x2, y2 = get_wall_end_pos(pos[0], pos[1], int(size))
-                            ret.append(f"type_wall {pos[0]} {pos[1]} {x2} {y2} "
-                                       f"{EDITOR_TOOL_TO_ID[tool]}")
+                toolid = EDITOR_TOOL_TO_ID[tool]
+                change = props.get("CHANGE TYPE", '0')
+                if change == '0':
+                    place = 1
+                elif change == '1':
+                    place = 0
+                elif change == '2':
+                    toolid = 'None'
+                size = props.get("SIZE", '0')
+                x2, y2 = 'None', 'None'
+                if size != '0':
+                    x2, y2 = get_wall_end_pos(pos[0], pos[1], int(size))
+                if color != 'None':
+                    color = int(color) - 1
+                ret.append(f'tcwall place {place} x1 {pos[0]} y1 {pos[1]} x2 {x2} type {toolid} color {color}')
             elif group == "OTHER":
                 if tool == "POLY":
                     if props.get("CHANGE TYPE", '0') == '0':
@@ -1894,7 +1893,7 @@ if __name__ == "__main__":
             if len(props) == 0:
                 props = [[]]
             if group in ("WALLS", "OTHER"):
-                for extra in ("CHANGE TYPE", "TEAM"):
+                for extra in ("CHANGE TYPE", "TEAM", "COLOR"):
                     if extra not in props[0]:
                         props[0].append(extra)
             if group == "WALLS" and "SIZE" not in props[0]:
