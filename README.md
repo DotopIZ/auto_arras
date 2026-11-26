@@ -3,16 +3,19 @@
 A tool for automating actions in the arras.io sandbox.
 This is a macro generator and runner, NOT a script 
 
+## Installation
+Install required modules with:
+`python -m pip install -r requirements.txt`
+
 ## Quick start
 
 ### Generate a template from an image
 
-    python main.py generate image -r 52 52 *path-to-your-image*
+    python auto-arras.py generate image -r 52 52 *path-to-your-image*
 
 ### Or create a schematic
 
-Open schematic_editor.py. To save it as a template use ctrl + E
-or files > export
+Open schematic_editor.py. To save it as a template use ctrl + S
 
 ### Paste it into arras
 
